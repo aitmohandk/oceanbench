@@ -4,7 +4,7 @@
 
 from datetime import datetime, timedelta
 from typing import List
-from xarray import Dataset, open_dataset
+from xarray import Dataset, open_dataset, open_zarr
 import copernicusmarine
 import logging
 
@@ -25,10 +25,11 @@ def _glorys_subset(start_datetime: datetime) -> Dataset:
 
 def _to_1_4(glorys_dataset: Dataset) -> Dataset:
     initial_datetime = datetime.fromisoformat(str(glorys_dataset["time"][0].values))
+    initial_datetime = initial_datetime - timedelta(days=1)
     initial_datetime_string = initial_datetime.strftime("%Y%m%d")
-    return open_dataset(
+    return open_zarr(
         f"https://minio.dive.edito.eu/project-glonet/public/glorys14_full_2024/{initial_datetime_string}.zarr",
-        engine="zarr",
+        #engine="zarr",
     )
 
 

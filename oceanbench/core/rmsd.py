@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: EUPL-1.2
 
 from functools import partial
-import multiprocessing
 from typing import List
 
 import numpy
@@ -55,15 +54,15 @@ def _get_rmsd(
     depth_level: DepthLevel,
     lead_day: int,
 ) -> float:
-    cpu_count = multiprocessing.cpu_count()
-    with multiprocessing.Pool(cpu_count) as _:
-        challenger_dataarray = select_variable_day_and_depth(challenger_dataset, variable, depth_level, lead_day)
-        reference_dataarray = select_variable_day_and_depth(reference_dataset, variable, depth_level, lead_day)
-        return _rmsd(challenger_dataarray.data, reference_dataarray.data)
+    challenger_dataarray = select_variable_day_and_depth(challenger_dataset, variable, depth_level, lead_day)
+    reference_dataarray = select_variable_day_and_depth(reference_dataset, variable, depth_level, lead_day)
+    return _rmsd(challenger_dataarray.data, reference_dataarray.data)
 
+def get_lead_days_count(dataset: xarray.Dataset) -> int:
+    time_var_name = Dimension.TIME.dimension_name_from_dataset(dataset)
+    return len(dataset.coords[time_var_name])
 
-LEAD_DAYS_COUNT = 10
-
+# LEAD_DAYS_COUNT = 1   # TODO : make this a parameter
 
 def _get_rmsd_for_all_lead_days(
     dataset: xarray.Dataset,
@@ -71,6 +70,7 @@ def _get_rmsd_for_all_lead_days(
     variable: Variable,
     depth_level: DepthLevel,
 ) -> list[float]:
+    LEAD_DAYS_COUNT = get_lead_days_count(dataset)
     return list(
         map(
             partial(
@@ -151,6 +151,7 @@ def rmsd(
         )
         for (variable, depth_level) in all_combinations
     }
+    LEAD_DAYS_COUNT = get_lead_days_count(challenger_datasets[0])
     score_dataframe = pandas.DataFrame(scores)
     score_dataframe.index = lead_day_labels(1, LEAD_DAYS_COUNT)
     return score_dataframe.T
