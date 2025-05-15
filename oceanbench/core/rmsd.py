@@ -56,13 +56,12 @@ def _get_rmsd(
 ) -> float:
     challenger_dataarray = select_variable_day_and_depth(challenger_dataset, variable, depth_level, lead_day)
     reference_dataarray = select_variable_day_and_depth(reference_dataset, variable, depth_level, lead_day)
-    return _rmsd(challenger_dataarray.data, reference_dataarray.data)
+    return _rmsd(challenger_dataarray.compute().data, reference_dataarray.compute().data)
 
 def get_lead_days_count(dataset: xarray.Dataset) -> int:
     time_var_name = Dimension.TIME.dimension_name_from_dataset(dataset)
     return len(dataset.coords[time_var_name])
 
-# LEAD_DAYS_COUNT = 1   # TODO : make this a parameter
 
 def _get_rmsd_for_all_lead_days(
     dataset: xarray.Dataset,

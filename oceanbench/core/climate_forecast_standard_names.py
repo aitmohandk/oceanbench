@@ -31,24 +31,7 @@ class StandardVariable(Enum):
 
 
 def _get_variable_name_from_standard_name(dataset: xarray.Dataset, standard_name: str) -> str:
-    VARIABLE_DICT = {
-        "depth": "depth",
-        "time": "time",
-        "lat": "latitude",
-        "lon": "longitude",
-        "latitude": "latitude",
-        "longitude": "longitude",
-        "so": "sea_water_salinity",
-        "zos": "sea_surface_height_above_geoid",
-        "thetao": "sea_water_potential_temperature",
-        "uo": "eastward_sea_water_velocity",
-        "vo": "northward_sea_water_velocity",
-        "mld": "mixed_layer_depth",
-    }
-
     for variable_name in dataset.variables:
-        if hasattr(dataset[variable_name], "standard_name") and dataset[variable_name].standard_name == standard_name:
-            return str(variable_name)
-        elif VARIABLE_DICT[variable_name] == standard_name:
+        if hasattr(dataset[variable_name], "standard_name") and dataset[variable_name].attrs.get("standard_name",'') == standard_name:
             return str(variable_name)
     raise Exception(f"No variable with standard name {standard_name} found in dataset")
