@@ -23,6 +23,11 @@ class StandardVariable(Enum):
     SALINITY = "sea_water_salinity"
     NORTHWARD_VELOCITY = "northward_sea_water_velocity"
     EASTWARD_VELOCITY = "eastward_sea_water_velocity"
+    HEIGHT_ABOVE_ELLIPSOID = "sea_surface_height_above_reference_ellipsoid"
+    EASTWARD_VELOCITY_2 = "U"
+    NORTHWARD_VELOCITY_2 = "V"
+    HEIGHT_ABOVE_SEA_LEVEL = "sea_surface_height_above_sea_level"
+    TEMPERATURE_2 = "sea_surface_foundation_temperature"
 
     def variable_name_from_dataset_standard_names(
         self, dataset: xarray.Dataset,

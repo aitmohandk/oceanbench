@@ -126,6 +126,7 @@ def _is_surface(depth_level: DepthLevel) -> bool:
 def _variable_and_depth_combinations(
     dataset: xarray.Dataset, variables: list[Variable]
 ) -> list[tuple[Variable, DepthLevel]]:
+
     return list(
         (variable, depth_level)
         for (depth_level, variable) in product(list(DepthLevel), variables)

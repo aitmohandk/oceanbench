@@ -28,7 +28,7 @@ def _to_1_4(glorys_dataset: Dataset) -> Dataset:
     initial_datetime = datetime.fromisoformat(str(glorys_dataset["time"][0].values))
     initial_datetime_string = initial_datetime.strftime("%Y%m%d")
     return xr.open_dataset(
-        f"https://minio.dive.edito.eu/project-glonet/public/glorys14_full_2024/{initial_datetime_string}.zarr",
+        f"https://minio.dive.edito.eu/project-oceanbench/public/glorys14_full_2024/{initial_datetime_string}.zarr",
         engine="zarr",
     )
 
