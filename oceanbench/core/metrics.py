@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: EUPL-1.2
 
+from loguru import logger
 import pandas
 import xarray
 
@@ -25,11 +26,11 @@ def rmsd_of_variables_compared_to_glorys(
         challenger_datasets=challenger_datasets,
         reference_datasets=glorys_datasets(challenger_datasets),
         variables=[
-            Variable.HEIGHT,
-            Variable.TEMPERATURE,
-            Variable.SALINITY,
-            Variable.NORTHWARD_VELOCITY,
-            Variable.EASTWARD_VELOCITY,
+            Variable.SEA_SURFACE_HEIGHT_ABOVE_GEOID,
+            Variable.SEA_WATER_POTENTIAL_TEMPERATURE,
+            Variable.SEA_WATER_SALINITY,
+            Variable.NORTHWARD_SEA_WATER_VELOCITY,
+            Variable.EASTWARD_SEA_WATER_VELOCITY,
         ],
     )
 

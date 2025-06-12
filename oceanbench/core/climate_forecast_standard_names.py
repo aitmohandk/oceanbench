@@ -5,6 +5,7 @@
 from enum import Enum
 import xarray
 from typing import Dict, Optional
+from loguru import logger
 
 
 class StandardDimension(Enum):
@@ -18,16 +19,19 @@ class StandardDimension(Enum):
 
 
 class StandardVariable(Enum):
-    HEIGHT = "sea_surface_height_above_geoid"
-    TEMPERATURE = "sea_water_potential_temperature"
-    SALINITY = "sea_water_salinity"
-    NORTHWARD_VELOCITY = "northward_sea_water_velocity"
-    EASTWARD_VELOCITY = "eastward_sea_water_velocity"
-    HEIGHT_ABOVE_ELLIPSOID = "sea_surface_height_above_reference_ellipsoid"
-    EASTWARD_VELOCITY_2 = "U"
-    NORTHWARD_VELOCITY_2 = "V"
-    HEIGHT_ABOVE_SEA_LEVEL = "sea_surface_height_above_sea_level"
-    TEMPERATURE_2 = "sea_surface_foundation_temperature"
+    SEA_SURFACE_HEIGHT_ABOVE_GEOID = "sea_surface_height_above_geoid"
+    SEA_WATER_POTENTIAL_TEMPERATURE = "sea_water_potential_temperature"
+    SEA_WATER_SALINITY = "sea_water_salinity"
+    NORTHWARD_SEA_WATER_VELOCITY = "northward_sea_water_velocity"
+    EASTWARD_SEA_WATER_VELOCITY = "eastward_sea_water_velocity"
+    UPWARD_SEA_WATER_VELOCITY = "upward_sea_water_velocity"
+    MIXED_LAYER_THICKNESS = "ocean_mixed_layer_thickness"
+    GEOSTROPHIC_NORTHWARD_SEA_WATER_VELOCITY = "geostrophic_northward_sea_water_velocity"
+    GEOSTROPHIC_EASTWARD_SEA_WATER_VELOCITY = "geostrophic_eastward_sea_water_velocity"
+    MEAN_DYNAMIC_TOPOGRAPHY = "mean_dynamic_topography"
+    SEA_SURFACE_HEIGHT_ABOVE_SEA_LEVEL = "sea_surface_height_above_sea_level"
+    SEA_SURFACE_TEMPERATURE = "sea_surface_temperature"
+    SEA_SURFACE_SALINITY = "sea_surface_salinity"
 
     def variable_name_from_dataset_standard_names(
         self, dataset: xarray.Dataset,
@@ -37,6 +41,11 @@ class StandardVariable(Enum):
 
 def _get_variable_name_from_standard_name(dataset: xarray.Dataset, standard_name: str) -> str:
     for variable_name in dataset.variables:
-        if hasattr(dataset[variable_name], "standard_name") and dataset[variable_name].attrs.get("standard_name",'') == standard_name:
+        var_std_name = dataset[variable_name].attrs.get("standard_name",'').lower()
+        if not var_std_name:
+            var_std_name = dataset[variable_name].attrs.get("std_name", '').lower()
+
+        if hasattr(dataset[variable_name], "standard_name") and var_std_name == standard_name:
             return str(variable_name)
+
     raise Exception(f"No variable with standard name {standard_name} found in dataset")
