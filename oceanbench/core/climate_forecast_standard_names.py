@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: EUPL-1.2
 
 from enum import Enum
+from huggingface_hub import DatasetCard
+from scipy import datasets
 import xarray
 from typing import Dict, Optional
 from loguru import logger
@@ -39,13 +41,57 @@ class StandardVariable(Enum):
         return _get_variable_name_from_standard_name(dataset, self.value)
 
 
-def _get_variable_name_from_standard_name(dataset: xarray.Dataset, standard_name: str) -> str:
-    for variable_name in dataset.variables:
-        var_std_name = dataset[variable_name].attrs.get("standard_name",'').lower()
+def _get_variable_name_from_standard_name(dataset: xarray.Dataset | xarray.DataArray, standard_name: str) -> Optional[str]:
+    """
+    Retourne le nom de la variable correspondant au standard_name dans un Dataset ou DataArray.
+    """
+    standard_name = standard_name.lower()
+    if isinstance(dataset, xarray.Dataset):
+        # Parcours toutes les variables du Dataset
+        for variable_name in dataset.data_vars:
+            var = dataset[variable_name]
+            var_std_name = var.attrs.get("standard_name", '').lower()
+            if not var_std_name:
+                var_std_name = var.attrs.get("std_name", '').lower()
+            if var_std_name == standard_name:
+                return str(variable_name)
+        # Si aucune variable ne correspond
+        return None
+    elif isinstance(dataset, xarray.DataArray):
+        var_std_name = dataset.attrs.get("standard_name", '').lower()
         if not var_std_name:
-            var_std_name = dataset[variable_name].attrs.get("std_name", '').lower()
+            var_std_name = dataset.attrs.get("std_name", '').lower()
+        if var_std_name == standard_name:
+            # Pour un DataArray, le nom est dans .name
+            return str(dataset.name)
+        return None
+    else:
+        raise TypeError(f"Expected xarray.Dataset or xarray.DataArray, got {type(dataset)}")
 
-        if hasattr(dataset[variable_name], "standard_name") and var_std_name == standard_name:
+
+
+'''def _get_variable_name_from_standard_name(dataset: xarray.Dataset | xarray.DataArray, standard_name: str) -> str:
+    if isinstance(dataset, xarray.Dataset):
+        vars = dataset.variables if hasattr(dataset, 'variables') else dataset.data_vars
+        for variable_name in vars:   # dataset.variables:
+            var_std_name = dataset[variable_name].attrs.get("standard_name",'').lower()
+            if not var_std_name:
+                var_std_name = dataset[variable_name].attrs.get("std_name", '').lower()
+
+            if hasattr(dataset[variable_name], "standard_name") and var_std_name == standard_name:
+                return str(variable_name)
+    elif isinstance(dataset, xarray.DataArray):
+        vars = dataset
+        var_std_name = vars.attrs.get("standard_name",'').lower()
+        if not var_std_name:
+            var_std_name = vars.attrs.get("std_name", '').lower()
+
+        if hasattr(vars, "standard_name") and var_std_name == standard_name:
             return str(variable_name)
 
-    raise Exception(f"No variable with standard name {standard_name} found in dataset")
+    else:
+        raise TypeError("Expected xarray.Dataset or xarray.DataArray, got {}".format(type(dataset)))
+    return None
+
+    # raise Warning(f"No variable with standard name {standard_name} found in dataset")
+'''

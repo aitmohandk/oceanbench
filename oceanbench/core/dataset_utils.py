@@ -5,6 +5,7 @@
 from datetime import datetime
 from enum import Enum
 from typing import Optional
+import numpy as np
 import xarray
 
 from oceanbench.core.climate_forecast_standard_names import (
@@ -63,7 +64,50 @@ def get_dimension(dataset: xarray.Dataset, dimension: Dimension) -> xarray.DataA
     return dataset[dimension.dimension_name_from_dataset(dataset)]
 
 
+
 def select_variable_day_and_depth(
+    dataset: xarray.Dataset,
+    variable: Variable,
+    depth_level: DepthLevel,
+    lead_day: int,
+) -> xarray.DataArray:
+    depth_name = StandardDimension.DEPTH.dimension_name_from_dataset_standard_names(dataset)
+    time_name = StandardDimension.TIME.dimension_name_from_dataset_standard_names(dataset)
+    try:
+        var_data = get_variable(dataset, variable)
+        
+        # Vérifier si la dimension time existe et contient des valeurs
+        if time_name and time_name in var_data.dims and var_data.sizes.get(time_name, 0) > 0:
+            # Vérifier que lead_day est dans les limites
+            if lead_day < var_data.sizes[time_name]:
+                new_dataset = var_data.isel({time_name: lead_day})
+            else:
+                # lead_day trop grand, prendre le dernier temps disponible
+                new_dataset = var_data.isel({time_name: -1})
+        else:
+            # Pas de dimension time ou dimension vide, retourner la variable telle quelle
+            new_dataset = var_data
+        
+        # Appliquer la sélection de profondeur si applicable
+        if depth_name and depth_name in new_dataset.coords:
+            new_dataset = new_dataset.sel({depth_name: depth_level.value})
+            
+        return new_dataset
+    except Exception as exception:
+        try:
+            start_datetime = datetime.fromisoformat(str(get_variable(dataset, variable)[0].values))
+        except:
+            start_datetime = "unknown"
+            
+        details = (
+            f"start_datetime={start_datetime}, variable={variable.value},"
+            + f" depth={depth_level.value}, lead_day={lead_day}"
+        )
+        raise Exception(f"Could not select data: {details}") from exception
+
+
+
+'''def select_variable_day_and_depth(
     dataset: xarray.Dataset,
     variable: Variable,
     depth_level: DepthLevel,
@@ -84,10 +128,46 @@ def select_variable_day_and_depth(
             f"start_datetime={start_datetime}, variable={variable.value},"
             + f" depth={depth_level.value}, lead_day={lead_day}"
         )
-        raise Exception(f"Could not select data: {details}") from exception
+        raise Exception(f"Could not select data: {details}") from exception'''
 
 
 def select_variable_day(
+    dataset: xarray.Dataset,
+    variable: Variable,
+    lead_day: int,
+) -> xarray.DataArray:
+    time_name = StandardDimension.TIME.dimension_name_from_dataset_standard_names(dataset)
+    try:
+        var_data = get_variable(dataset, variable)
+        
+        # Vérifier si la dimension time existe et contient des valeurs
+        if time_name and time_name in var_data.dims and var_data.sizes.get(time_name, 0) > 0:
+            # Vérifier que lead_day est dans les limites
+            if lead_day < var_data.sizes[time_name]:
+                new_dataset = var_data.isel({time_name: lead_day})
+            else:
+                # lead_day trop grand, prendre le dernier temps disponible
+                new_dataset = var_data.isel({time_name: -1})
+        else:
+            # Pas de dimension time ou dimension vide, retourner la variable telle quelle
+            new_dataset = var_data
+            
+        return new_dataset
+    except Exception as exception:
+        # Essayer d'extraire les informations pour le message d'erreur
+        try:
+            start_datetime = datetime.fromisoformat(str(get_variable(dataset, variable)[0].values))
+        except:
+            start_datetime = "unknown"
+            
+        details = (
+            f"start_datetime={start_datetime}, variable={variable.value},"
+            + f" lead_day={lead_day}"
+        )
+        raise Exception(f"Could not select data: {details}") from exception
+
+
+'''def select_variable_day(
     dataset: xarray.Dataset,
     variable: Variable,
     lead_day: int,
@@ -102,4 +182,30 @@ def select_variable_day(
             f"start_datetime={start_datetime}, variable={variable.value},"
             + f" lead_day={lead_day}"
         )
-        raise Exception(f"Could not select data: {details}") from exception
+        raise Exception(f"Could not select data: {details}") from exception'''
+
+
+def get_length(obj):
+    """Obtient la longueur en gérant différents cas"""
+    if obj is None:
+        return 0
+    elif isinstance(obj, (list, tuple, str, dict, set)):
+        return len(obj)
+    elif isinstance(obj, np.ndarray):
+        return obj.size if obj.ndim > 0 else 1
+    elif isinstance(obj, (xarray.Dataset, xarray.DataArray)):
+        # Gestion spécifique pour xarray
+        try:
+            return len(obj)
+        except TypeError:
+            # Si c'est un scalaire ou 0-dimensionnel
+            return 1 if obj.ndim == 0 else obj.size
+    elif hasattr(obj, '__len__'):
+        try:
+            return len(obj)
+        except TypeError:
+            # L'objet a __len__ mais len() échoue (ex: scalaire NumPy, etc.)
+            return 1
+    else:
+        # Scalaire ou objet sans taille
+        return 1
