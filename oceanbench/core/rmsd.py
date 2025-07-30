@@ -160,7 +160,7 @@ def _variale_depth_label(dataset: xarray.Dataset, variable: Variable, depth_leve
             else VARIABLE_LABELS[variable]
         ).capitalize()
     else:
-        VARIABLE_LABELS[variable].capitalize()
+        return VARIABLE_LABELS[variable].capitalize()
 
 
 def _has_depths(dataset: xarray.Dataset, variable: Variable) -> bool:
@@ -272,4 +272,5 @@ def rmsd(
     LEAD_DAYS_COUNT = get_lead_days_count(challenger_datasets[0])
     score_dataframe = pandas.DataFrame(scores)
     score_dataframe.index = lead_day_labels(1, LEAD_DAYS_COUNT)
+    print(score_dataframe.to_markdown())
     return score_dataframe.T
