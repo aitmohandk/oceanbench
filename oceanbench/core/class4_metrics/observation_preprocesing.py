@@ -7,7 +7,7 @@ import geopandas as gpd
 from scipy.spatial import cKDTree
 import pyinterp
 import pyinterp.backends.xarray
-import xesmf as xe
+# import xesmf as xe
 
 
 # ------------------------------
@@ -174,15 +174,15 @@ def match_and_interpolate_vectorized(
                 _, idx = tree.query(np.column_stack([sub_lons, sub_lats]))
                 model_vals = values_grid[idx]
 
-            elif method == "xesmf":
-                regridder = xe.Regridder(
-                    model_slice[varname].to_dataset(name=varname),
-                    xr.Dataset({"lat": (["points"], sub_lats), "lon": (["points"], sub_lons)}),
-                    method="bilinear",
-                    periodic=False,
-                    reuse_weights=True,
-                )
-                model_vals = regridder(model_slice[varname]).values
+            #elif method == "xesmf":
+            #    regridder = xe.Regridder(
+            #        model_slice[varname].to_dataset(name=varname),
+            #        xr.Dataset({"lat": (["points"], sub_lats), "lon": (["points"], sub_lons)}),
+            #        method="bilinear",
+            #        periodic=False,
+            #        reuse_weights=True,
+            #    )
+            #    model_vals = regridder(model_slice[varname]).values
 
             elif method == "idw":
                 lon2d, lat2d = np.meshgrid(model_slice["lon"].values, model_slice["lat"].values)
