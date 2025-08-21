@@ -15,10 +15,8 @@ import geopandas as gpd
 import psutil
 import pyinterp
 from scipy.spatial import cKDTree
-import xesmf as xe
+#import xesmf as xe
 import xskillscore as xs
-# from xskillscore import get_weighted_mean, get_weighted_std, get_weighted_variance
-# from xskillscore import get_weighted_quantile, get_weighted_median
 from xskillscore import rmse, pearson_r, mae, crps_ensemble 
 
 def log_memory(fct):
@@ -48,16 +46,15 @@ def interpolate_model_on_obs(model_ds: xr.Dataset, obs_df: pd.DataFrame, variabl
         return interpolate_with_pyinterp(model_ds, obs_df, variable)
     elif method == "kdtree":
         return interpolate_with_kdtree(model_ds, obs_df, variable)
-    elif method == "xesmf":
-        return interpolate_with_xesmf(model_ds, obs_df, variable)
+    #elif method == "xesmf":
+    #    return interpolate_with_xesmf(model_ds, obs_df, variable)
     else:
         raise ValueError(f"Unknown interpolation method: {method}")
 
 
 def interpolate_with_pyinterp(model_ds: xr.Dataset, obs_df: pd.DataFrame, variable: str) -> pd.DataFrame:
-    log_memory("START interpolate_with_pyinterp")
-    import pyinterp
-    import numpy as np
+    #log_memory("START interpolate_with_pyinterp")
+
     model_ds = model_ds.copy()
 
     obs_df = obs_df.copy()
@@ -74,13 +71,6 @@ def interpolate_with_pyinterp(model_ds: xr.Dataset, obs_df: pd.DataFrame, variab
                 continue
             obs_lons = obs_df.loc[mask, "lon"].values
             obs_lats = obs_df.loc[mask, "lat"].values
-
-            '''t_diffs = np.abs(model_times - np.datetime64(t_model))
-            t_idx = int(np.argmin(t_diffs))
-            da = model_ds.isel(time=t_idx)
-            # S'assurer que da est 2D (lat, lon)
-            if da.ndim != 2:
-                raise ValueError(f"Expected 2D DataArray (lat, lon), got shape {da.shape}")'''
             
             t_diffs = np.abs(model_times - np.datetime64(t_model))
             t_idx = int(np.argmin(t_diffs))
@@ -108,7 +98,7 @@ def interpolate_with_pyinterp(model_ds: xr.Dataset, obs_df: pd.DataFrame, variab
             if len(interp_vals) != n_obs:
                 raise ValueError(f"Interpolation output shape mismatch: {len(interp_vals)} vs {n_obs}")
             obs_df.loc[mask, f"{variable}_model"] = interp_vals
-        log_memory("END interpolate_with_pyinterp")
+        #log_memory("END interpolate_with_pyinterp")
 
         return obs_df
     except Exception as e:
@@ -117,60 +107,7 @@ def interpolate_with_pyinterp(model_ds: xr.Dataset, obs_df: pd.DataFrame, variab
         raise
 
 
-'''def interpolate_with_pyinterp(model_ds: xr.Dataset, obs_df: pd.DataFrame, variables: list = None) -> pd.DataFrame:
-    import pyinterp
-    import numpy as np
-
-    # Détection automatique des variables à interpoler
-    if variables is None:
-        variables = list(model_ds.data_vars)
-
-    obs_df = obs_df.copy()
-    for var in variables:
-        obs_df[f"{var}_model"] = np.nan
-
-    # Indexation rapide des temps
-    model_times = pd.to_datetime(model_ds.time.values)
-    time_to_idx = {t: i for i, t in enumerate(model_times)}
-    try:
-
-        for t_model in np.unique(obs_df["matched_model_time"]):
-            if pd.isnull(t_model):
-                continue
-            mask = obs_df["matched_model_time"] == t_model
-            obs_lons = obs_df.loc[mask, "lon"].values
-            obs_lats = obs_df.loc[mask, "lat"].values
-
-            for var in variables:
-                # On ne charge que la tranche utile# Recherche l'index du temps le plus proche dans model_times
-                t_diffs = np.abs(model_times - np.datetime64(t_model))
-                t_idx = int(np.argmin(t_diffs))
-                da = model_ds[var].isel(time=t_idx)
-                lon = da.lon.values
-                lat = da.lat.values
-                lon2d, lat2d = np.meshgrid(lon, lat)
-                points = np.column_stack([lon2d.ravel(), lat2d.ravel()])
-                values = da.values.ravel()
-
-                # Construction du RTree pour ce pas de temps et variable
-                grid = pyinterp.RTree()
-                grid.packing(points, values)
-
-                # Interpolation IDW sur ce batch d'observations
-                interp_vals = grid.inverse_distance_weighting(
-                    np.column_stack([obs_lons, obs_lats]), k=4
-                )
-                obs_df.loc[mask, f"{var}_model"] = interp_vals
-    except Exception as e:
-        import traceback
-        traceback.print_exc()
-
-
-    return obs_df'''
-
-
-
-def interpolate_with_xesmf(model_ds: xr.Dataset, obs_df: gpd.GeoDataFrame, variable: str) -> np.ndarray:
+'''def interpolate_with_xesmf(model_ds: xr.Dataset, obs_df: gpd.GeoDataFrame, variable: str) -> np.ndarray:
     """Interpolate model values on observation points using xESMF."""
     if 'lat' not in model_ds or 'lon' not in model_ds:
         raise ValueError("Model dataset must have 'lat' and 'lon' coordinates.")
@@ -201,7 +138,7 @@ def interpolate_with_xesmf(model_ds: xr.Dataset, obs_df: gpd.GeoDataFrame, varia
     # Extract interpolated values at obs points
     # This assumes interp has dimensions time, y, x
     result = interp.values.diagonal(axis1=1, axis2=2)
-    return result.T  # shape: (n_obs, n_time) -> transpose if needed
+    return result.T  # shape: (n_obs, n_time) -> transpose if needed'''
 
 
 def interpolate_with_kdtree(model_ds: xr.Dataset, obs_df: gpd.GeoDataFrame, variable: str) -> np.ndarray:
@@ -233,16 +170,6 @@ def interpolate_with_kdtree(model_ds: xr.Dataset, obs_df: gpd.GeoDataFrame, vari
 
 
 # -------------------- Binning --------------------
-'''def apply_binning(df: pd.DataFrame, bin_specs: Dict[str, Union[int, List]]) -> pd.DataFrame:
-    if not bin_specs:
-        return df
-    for dim, bins in bin_specs.items():
-        if isinstance(bins, int):
-            df[f"{dim}_bin"] = pd.qcut(df[dim], q=bins, duplicates="drop")
-        else:
-            df[f"{dim}_bin"] = pd.cut(df[dim], bins=bins)
-    return df'''
-
 def apply_binning(
     df: pd.DataFrame,
     bin_specs: Optional[Dict[str, Union[int, list, str]]] = None
@@ -258,15 +185,13 @@ def apply_binning(
     Returns:
         pd.DataFrame: DataFrame avec colonnes de bin ajoutées.
     """
-    import numpy as np
-    import pandas as pd
-    log_memory("START apply_binning")
+    #log_memory("START apply_binning")
 
     # Valeurs par défaut pour les bins
     default_bins = {
         "time": "1D",  # Binning temporel journalier
         "lat": np.arange(-90, 91, 1),
-        "lon": np.arange(-180, 181, 1),
+        "lon": np.arange(-180, 180, 1),
         "depth": None,  # À définir si la colonne existe
     }
     if bin_specs is None:
@@ -314,7 +239,7 @@ def apply_binning(
             print(f"[apply_binning] Erreur pour la dimension '{dim}': {e}")
             continue
     
-    log_memory("END apply_binning")
+    #log_memory("END apply_binning")
     return (df, groupby)
 
 # -------------------- Scoring --------------------
@@ -359,7 +284,7 @@ def compute_scores_xskillscore(
     Returns:
         DataFrame avec les scores calculés.
     """
-    log_memory("START compute_scores_xskillscore")
+    #log_memory("START compute_scores_xskillscore")
     try:
         all_results = {}
         # 1. Binning si demandé
@@ -444,25 +369,12 @@ def compute_scores_xskillscore(
 
         all_results["global"] = global_result
         #return pd.DataFrame(all_results)
-        log_memory("END compute_scores_xskillscore")
+        #log_memory("END compute_scores_xskillscore")
         return all_results
     except Exception as e:
         import traceback
         print(f"[compute_scores_xskillscore] Exception: {e}")
         traceback.print_exc()
-
-
-'''def get_score_func(metric: str) -> Callable:
-    if metric == "rmsd":
-        return lambda yhat, y: rmse(yhat, y, dim=())
-    elif metric == "mae":
-        return lambda yhat, y: mae(yhat, y, dim=())
-    elif metric == "pearson_r":
-        return lambda yhat, y: pearson_r(yhat, y, dim=())
-    elif metric == "crps":
-        return lambda yhat, y: crps_ensemble(yhat, y, dim=())
-    else:
-        raise ValueError(f"Unknown metric: {metric}")'''
 
 # Mapping par défaut : variable → nom du champ QC + flags valides
 DEFAULT_QC_MAPPING: Dict[str, Dict[str, List[int]]] = {
@@ -540,7 +452,7 @@ def xr_dataset_to_dataframe(ds: xr.Dataset, var: str, include_geometry: bool = T
     Returns:
         pd.DataFrame or gpd.GeoDataFrame: Flattened dataframe with all coordinates and variables.
     """
-    log_memory("START xr_dataset_to_dataframe") 
+    #log_memory("START xr_dataset_to_dataframe") 
     # Convert to DataFrame and reset index
     ds = ds.copy()
     df = ds.to_dataframe().reset_index()
@@ -557,7 +469,7 @@ def xr_dataset_to_dataframe(ds: xr.Dataset, var: str, include_geometry: bool = T
     if include_geometry and {'lon', 'lat'}.issubset(df.columns):
         import geopandas as gpd
         df = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon, df.lat), crs="EPSG:4326")
-    log_memory("END xr_dataset_to_dataframe")
+    #log_memory("END xr_dataset_to_dataframe")
     return df
 
 # -------------------- Orchestrator --------------------
@@ -589,7 +501,7 @@ class Class4Evaluator:
         variables: List[str],
         ref_coords: dict,
     ) -> pd.DataFrame:
-        log_memory("START run Class4Evaluator")
+        #log_memory("START run Class4Evaluator")
         all_scores = {}
         for var in variables:
             ds = model_ds[var].copy()
@@ -609,34 +521,11 @@ class Class4Evaluator:
 
 
             ds, groupby = apply_binning(ds, self.bin_specs)
-            # Si la colonne d'observation s'appelle différemment, adapte ici
 
 
             # Harmonisation des colonnes
-            obs_col = f"{var}_obs"  # ou le nom de la colonne d'observation pour cette variable
-            model_col = f"{var}_model"  # ou le nom de la colonne du modèle pour cette variable
-
-            '''# Si besoin, adapte ici pour copier la bonne colonne
-            if obs_col not in interp.columns:
-                # Essaie de la récupérer depuis obs_df ou via le nom de la variable
-                if var in obs_df.columns:
-                    interp[obs_col] = obs_df[var].values
-                else:
-                    raise ValueError(f"Impossible de trouver la colonne d'observation pour {var}")
-
-            if model_col not in interp.columns:
-                if "model_value" in interp.columns:
-                    interp[model_col] = interp["model_value"]
-                else:
-                    raise ValueError(f"Impossible de trouver la colonne du modèle interpolé pour {var}")
-
-            # On garde les colonnes utiles pour cette variable
-            cols = [obs_col, model_col]
-            for c in ["time", "lat", "lon", "depth"]:
-                if c in interp.columns:
-                    cols.append(c)
-            df = interp[cols].dropna(subset=[obs_col, model_col])
-            df["variable"] = var'''
+            obs_col = f"{var}_obs"  # nom de la colonne d'observation pour cette variable
+            model_col = f"{var}_model"  # nom de la colonne du modèle pour cette variable
 
             # Calcul des scores pour cette variable
             scores = compute_scores_xskillscore(
@@ -649,5 +538,5 @@ class Class4Evaluator:
             all_scores[var] = scores
             del matched
             gc.collect()
-        log_memory("END run Class4Evaluator")
+        #log_memory("END run Class4Evaluator")
         return all_scores
