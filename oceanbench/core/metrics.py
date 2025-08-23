@@ -13,7 +13,6 @@ from oceanbench.core.derived_quantities import add_mixed_layer_depth
 from oceanbench.core.derived_quantities import add_geostrophic_currents
 from oceanbench.core.rmsd import Variable, rmsd
 from oceanbench.core.references.glorys import glorys_datasets
-from oceanbench.core.class4_metrics.interface import compute_class4_metrics
 from oceanbench.core.dataset_utils import Variable
 from oceanbench.core.lagrangian_trajectory import (
     Zone,
@@ -72,21 +71,4 @@ def deviation_of_lagrangian_trajectories_compared_to_glorys(
         challenger_datasets=challenger_datasets,
         reference_datasets=glorys_datasets(challenger_datasets),
         zone=Zone.SMALL_ATLANTIC_NEWYORK_TO_NOUADHIBOU,
-    )
-
-
-
-def class4_metrics_of_variables(
-    challenger_datasets: List[xarray.Dataset],
-    observations: xarray.Dataset,
-    variables: list,  # Accept both str and Variable
-    **kwargs
-) -> DataFrame:
-    # Convert variables to Variable enum if needed
-    variables = [Variable[v] if isinstance(v, str) else v for v in variables]
-    return compute_class4_metrics(
-        model=challenger_datasets[0],
-        observations=observations,
-        variables=variables,
-        **kwargs
     )
