@@ -106,31 +106,6 @@ def select_variable_day_and_depth(
         raise Exception(f"Could not select data: {details}") from exception
 
 
-
-'''def select_variable_day_and_depth(
-    dataset: xarray.Dataset,
-    variable: Variable,
-    depth_level: DepthLevel,
-    lead_day: int,
-) -> xarray.DataArray:
-    depth_name = StandardDimension.DEPTH.dimension_name_from_dataset_standard_names(dataset)
-    time_name = StandardDimension.TIME.dimension_name_from_dataset_standard_names(dataset)
-    try:
-        new_dataset = get_variable(dataset, variable).isel({time_name: lead_day})
-        return (
-            new_dataset.sel({depth_name: depth_level.value})
-            if depth_name in get_variable(dataset, variable).coords
-            else new_dataset
-        )
-    except Exception as exception:
-        start_datetime = datetime.fromisoformat(str(get_variable(dataset, variable)[0].values))
-        details = (
-            f"start_datetime={start_datetime}, variable={variable.value},"
-            + f" depth={depth_level.value}, lead_day={lead_day}"
-        )
-        raise Exception(f"Could not select data: {details}") from exception'''
-
-
 def select_variable_day(
     dataset: xarray.Dataset,
     variable: Variable,
@@ -165,24 +140,6 @@ def select_variable_day(
             + f" lead_day={lead_day}"
         )
         raise Exception(f"Could not select data: {details}") from exception
-
-
-'''def select_variable_day(
-    dataset: xarray.Dataset,
-    variable: Variable,
-    lead_day: int,
-) -> xarray.DataArray:
-    time_name = StandardDimension.TIME.dimension_name_from_dataset_standard_names(dataset)
-    try:
-        new_dataset = get_variable(dataset, variable).isel({time_name: lead_day})
-        return new_dataset
-    except Exception as exception:
-        start_datetime = datetime.fromisoformat(str(get_variable(dataset, variable)[0].values))
-        details = (
-            f"start_datetime={start_datetime}, variable={variable.value},"
-            + f" lead_day={lead_day}"
-        )
-        raise Exception(f"Could not select data: {details}") from exception'''
 
 
 def get_length(obj):

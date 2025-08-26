@@ -20,9 +20,6 @@ from oceanbench.core.lagrangian_trajectory import (
 )
 
 
-
-
-
 def rmsd_of_variables_compared_to_glorys(
     challenger_datasets: List[xarray.Dataset],
 ) -> pandas.DataFrame:

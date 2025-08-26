@@ -47,7 +47,7 @@ def _get_variable_name_from_standard_name(dataset: xarray.Dataset | xarray.DataA
     """
     standard_name = standard_name.lower()
     if isinstance(dataset, xarray.Dataset):
-        # Parcours toutes les variables du Dataset
+        # Parcourir toutes les variables du Dataset
         for variable_name in dataset.data_vars:
             var = dataset[variable_name]
             var_std_name = var.attrs.get("standard_name", '').lower()
@@ -67,31 +67,3 @@ def _get_variable_name_from_standard_name(dataset: xarray.Dataset | xarray.DataA
         return None
     else:
         raise TypeError(f"Expected xarray.Dataset or xarray.DataArray, got {type(dataset)}")
-
-
-
-'''def _get_variable_name_from_standard_name(dataset: xarray.Dataset | xarray.DataArray, standard_name: str) -> str:
-    if isinstance(dataset, xarray.Dataset):
-        vars = dataset.variables if hasattr(dataset, 'variables') else dataset.data_vars
-        for variable_name in vars:   # dataset.variables:
-            var_std_name = dataset[variable_name].attrs.get("standard_name",'').lower()
-            if not var_std_name:
-                var_std_name = dataset[variable_name].attrs.get("std_name", '').lower()
-
-            if hasattr(dataset[variable_name], "standard_name") and var_std_name == standard_name:
-                return str(variable_name)
-    elif isinstance(dataset, xarray.DataArray):
-        vars = dataset
-        var_std_name = vars.attrs.get("standard_name",'').lower()
-        if not var_std_name:
-            var_std_name = vars.attrs.get("std_name", '').lower()
-
-        if hasattr(vars, "standard_name") and var_std_name == standard_name:
-            return str(variable_name)
-
-    else:
-        raise TypeError("Expected xarray.Dataset or xarray.DataArray, got {}".format(type(dataset)))
-    return None
-
-    # raise Warning(f"No variable with standard name {standard_name} found in dataset")
-'''

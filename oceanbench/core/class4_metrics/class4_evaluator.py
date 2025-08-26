@@ -3,21 +3,19 @@ import gc
 import os
 import traceback
 
-
-
 import pandas as pd
 import xarray as xr
 import numpy as np
 import dask.array as da
 from typing import Callable, Dict, List, Optional, Union
-from functools import partial
+
 import geopandas as gpd
 import psutil
 import pyinterp
 from scipy.spatial import cKDTree
 #import xesmf as xe
 import xskillscore as xs
-from xskillscore import rmse, pearson_r, mae, crps_ensemble 
+# from xskillscore import rmse, pearson_r, mae, crps_ensemble 
 
 def log_memory(fct):
     process = psutil.Process(os.getpid())
@@ -40,7 +38,6 @@ def match_times(model_ds: xr.Dataset, obs_df: pd.DataFrame, time_tol: pd.Timedel
     return obs_df.dropna(subset=["matched_model_time"])
 
 
-# -------------------- Interpolation --------------------
 def interpolate_model_on_obs(model_ds: xr.Dataset, obs_df: pd.DataFrame, variable: str, method: str = "pyinterp") -> pd.DataFrame:
     if method == "pyinterp":
         return interpolate_with_pyinterp(model_ds, obs_df, variable)
@@ -54,7 +51,6 @@ def interpolate_model_on_obs(model_ds: xr.Dataset, obs_df: pd.DataFrame, variabl
 
 def interpolate_with_pyinterp(model_ds: xr.Dataset, obs_df: pd.DataFrame, variable: str) -> pd.DataFrame:
     #log_memory("START interpolate_with_pyinterp")
-
     model_ds = model_ds.copy()
 
     obs_df = obs_df.copy()
@@ -169,7 +165,6 @@ def interpolate_with_kdtree(model_ds: xr.Dataset, obs_df: gpd.GeoDataFrame, vari
     return interp_values
 
 
-# -------------------- Binning --------------------
 def apply_binning(
     df: pd.DataFrame,
     bin_specs: Optional[Dict[str, Union[int, list, str]]] = None
@@ -218,7 +213,7 @@ def apply_binning(
             else:
                 # Pour les dimensions spatiales
                 if bins is None:
-                    # Si pas de bins fournis pour depth, essaie de faire des bins auto
+                    # Si pas de bins fournis pour depth, essayer de faire des bins auto
                     if dim == "depth":
                         unique_depths = np.unique(df[dim].dropna())
                         if len(unique_depths) > 1:
@@ -242,7 +237,6 @@ def apply_binning(
     #log_memory("END apply_binning")
     return (df, groupby)
 
-# -------------------- Scoring --------------------
 XSKILL_METRICS = {
     "rmse": xs.rmse,
     "mae": xs.mae,
@@ -287,18 +281,14 @@ def compute_scores_xskillscore(
     #log_memory("START compute_scores_xskillscore")
     try:
         all_results = {}
-        # 1. Binning si demandé
-        #if binning:
-        #    from oceanbench.core.class4_metrics.binning import apply_binning
-        #    df = apply_binning(df, binning)
         df = df.dropna(subset=[y_obs_col, y_pred_col])
-        # 2. Groupby si demandé
+
         if groupby:
             grouped = df.groupby(groupby, observed=False)
         else:
             grouped = [(None, df)]
 
-        # 4. Calcul des scores
+        # Calcul des scores
         bin_results = []
         for group_key, group_df in grouped:
             # Conversion en DataArray pour xskillscore
@@ -320,7 +310,7 @@ def compute_scores_xskillscore(
                         score = func(y_pred, y_true, dim="points")
                     elif metric == "crps_ensemble":
                         # Pour crps_ensemble, y_pred doit être (ensemble, points)
-                        # Ici, on suppose que y_pred est déjà de la bonne forme, sinon skip
+                        # Ici, on suppose que y_pred est déjà de la bonne forme
                         score = func(y_pred, y_true, dim="points")
                     else:
                         score = func(y_pred, y_true, dim="points")
@@ -340,7 +330,7 @@ def compute_scores_xskillscore(
                 else:
                     group_result[groupby[0]] = group_key
             bin_results.append(group_result)
-        ################################################all_results["by_bin"] = bin_results
+        # all_results["by_bin"] = bin_results  # TODO : activate and process this
         # 4. Score global (tous bins confondus)
         y_true_all = xr.DataArray(df[y_obs_col].values, dims="points")
         y_pred_all = xr.DataArray(df[y_pred_col].values, dims="points")
@@ -368,7 +358,6 @@ def compute_scores_xskillscore(
         # scores_df = pd.concat([scores_df, pd.DataFrame([global_result])], ignore_index=True)
 
         all_results["global"] = global_result
-        #return pd.DataFrame(all_results)
         #log_memory("END compute_scores_xskillscore")
         return all_results
     except Exception as e:
@@ -435,7 +424,7 @@ def filter_observations_by_qc(
             ds = ds.where(valid_mask, drop=drop)
     return ds
 
-# -------------------- Spatial Mask --------------------
+
 def apply_spatial_mask(df: pd.DataFrame, mask_fn: Callable[[pd.DataFrame], pd.Series]) -> pd.DataFrame:
     return df[mask_fn(df)]
 
@@ -462,17 +451,15 @@ def xr_dataset_to_dataframe(ds: xr.Dataset, var: str, include_geometry: bool = T
         raise ValueError(f"Variable '{var}' not found in dataset columns: {df.columns.tolist()}")
     df = df.dropna(subset=[var])
 
-    # Rename the variable column to f"{var}_obs"
     df = df.rename(columns={var: f"{var}_obs"})
 
     # Add geometry column if requested and coordinates are present
     if include_geometry and {'lon', 'lat'}.issubset(df.columns):
-        import geopandas as gpd
         df = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon, df.lat), crs="EPSG:4326")
     #log_memory("END xr_dataset_to_dataframe")
     return df
 
-# -------------------- Orchestrator --------------------
+
 class Class4Evaluator:
     def __init__(
         self,
@@ -506,7 +493,7 @@ class Class4Evaluator:
         for var in variables:
             ds = model_ds[var].copy()
             if self.mask_fn:
-                ds = apply_spatial_mask(interp, self.mask_fn)
+                ds = apply_spatial_mask(ds, self.mask_fn)
 
             # Apply QC if needed
             if self.apply_qc:
@@ -515,13 +502,11 @@ class Class4Evaluator:
                     qc_mappings=self.qc_mapping,
                 )
             obs_df = xr_dataset_to_dataframe(obs_ds, var, include_geometry=True)
-            # model_ds_var = model_ds[var]
+
             matched = match_times(ds, obs_df, self.time_tol)
             ds = interpolate_model_on_obs(ds, matched, var, method=self.interp_method)
-
-
+            # Binning
             ds, groupby = apply_binning(ds, self.bin_specs)
-
 
             # Harmonisation des colonnes
             obs_col = f"{var}_obs"  # nom de la colonne d'observation pour cette variable
