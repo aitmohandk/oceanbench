@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: EUPL-1.2
 
 from enum import Enum
-from huggingface_hub import DatasetCard
+# from huggingface_hub import DatasetCard
 from scipy import datasets
 import xarray
 from typing import Dict, Optional

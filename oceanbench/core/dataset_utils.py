@@ -65,17 +65,17 @@ def get_dimension(dataset: xarray.Dataset, dimension: Dimension) -> xarray.DataA
 
 
 
-def select_variable_day_and_depth(
+'''def select_variable_day_and_depth(
     dataset: xarray.Dataset,
     variable: Variable,
     depth_level: DepthLevel,
     lead_day: int,
 ) -> xarray.DataArray:
-    depth_name = StandardDimension.DEPTH.dimension_name_from_dataset_standard_names(dataset)
-    time_name = StandardDimension.TIME.dimension_name_from_dataset_standard_names(dataset)
+    depth_name = 'depth'   #StandardDimension.DEPTH.dimension_name_from_dataset_standard_names(dataset)
+    time_name = 'time'   #StandardDimension.TIME.dimension_name_from_dataset_standard_names(dataset)
     try:
         var_data = get_variable(dataset, variable)
-        
+    
         # Vérifier si la dimension time existe et contient des valeurs
         if time_name and time_name in var_data.dims and var_data.sizes.get(time_name, 0) > 0:
             # Vérifier que lead_day est dans les limites
@@ -91,6 +91,45 @@ def select_variable_day_and_depth(
         # Appliquer la sélection de profondeur si applicable
         if depth_name and depth_name in new_dataset.coords:
             new_dataset = new_dataset.sel({depth_name: depth_level.value})
+            
+        return new_dataset
+    except Exception as exception:
+        try:
+            start_datetime = datetime.fromisoformat(str(get_variable(dataset, variable)[0].values))
+        except:
+            start_datetime = "unknown"
+            
+        details = (
+            f"start_datetime={start_datetime}, variable={variable.value},"
+            + f" depth={depth_level.value}, lead_day={lead_day}"
+        )
+        raise Exception(f"Could not select data: {details}") from exception'''
+
+
+def select_variable_day_and_depth(
+    dataset: xarray.Dataset,
+    variable: Variable,
+    depth_level: DepthLevel,
+    lead_day: int,
+) -> xarray.DataArray:
+    depth_name = 'depth'
+    time_name = 'time'
+    try:
+        var_data = get_variable(dataset, variable)
+    
+        # Sélection temporelle
+        if time_name and time_name in var_data.dims and var_data.sizes.get(time_name, 0) > 0:
+            if lead_day < var_data.sizes[time_name]:
+                new_dataset = var_data.isel({time_name: lead_day})
+            else:
+                new_dataset = var_data.isel({time_name: -1})
+        else:
+            new_dataset = var_data
+        
+        # ✅ CORRECTION : Sélection de profondeur avec method="nearest"
+        if depth_name and depth_name in new_dataset.coords:
+            # Utiliser method="nearest" pour trouver la valeur la plus proche
+            new_dataset = new_dataset.sel({depth_name: depth_level.value}, method="nearest")
             
         return new_dataset
     except Exception as exception:
