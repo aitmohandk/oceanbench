@@ -53,126 +53,12 @@ def log_memory(fct):
     print(f"[{fct}] Memory usage: {mem_mb:.2f} MB")
 
 
-def detect_and_normalize_longitude_system(
-    ds_obs: xr.Dataset,
-    ds_model: xr.Dataset,
-    lon_name: str = "lon"
-) -> Tuple[xr.Dataset, xr.Dataset]:
-    """
-    Détecte et normalise les systèmes de coordonnées longitude pour assurer la compatibilité.
-    
-    Args:
-        ds_obs: Dataset d'observations
-        ds_model: Dataset de modèle
-        lon_name: Nom de la coordonnée longitude
-        
-    Returns:
-        Tuple[xr.Dataset, xr.Dataset]: Datasets normalisés (obs, model)
-    """    
-    # Obtenir les coordonnées longitude
-    if lon_name not in ds_obs.coords and lon_name not in ds_obs.data_vars:
-        logger.warning(f"Longitude coordinate '{lon_name}' not found in observations")
-        return ds_obs, ds_model
-    
-    if lon_name not in ds_model.coords and lon_name not in ds_model.data_vars:
-        logger.warning(f"Longitude coordinate '{lon_name}' not found in model")
-        return ds_obs, ds_model
-    
-    # Analyser les plages de longitude
-    obs_lon = ds_obs[lon_name].values
-    model_lon = ds_model[lon_name].values
-    
-    obs_lon_min, obs_lon_max = float(np.nanmin(obs_lon)), float(np.nanmax(obs_lon))
-    model_lon_min, model_lon_max = float(np.nanmin(model_lon)), float(np.nanmax(model_lon))
-    
-    logger.debug(f"Observations longitude range: [{obs_lon_min:.3f}, {obs_lon_max:.3f}]")
-    logger.debug(f"Model longitude range: [{model_lon_min:.3f}, {model_lon_max:.3f}]")
-    
-    # Détecter les systèmes de coordonnées
-    obs_system = _detect_longitude_system(obs_lon_min, obs_lon_max)
-    model_system = _detect_longitude_system(model_lon_min, model_lon_max)
-    
-    logger.debug(f"Detected systems - Obs: {obs_system}, Model: {model_system}")
-    
-    # Normaliser si nécessaire
-    ds_obs_norm = ds_obs
-    ds_model_norm = ds_model
-    
-    if obs_system != "[-180, 180]":
-        logger.info(f"Converting observations longitude from {obs_system} to [-180, 180]")
-        ds_obs_norm = _convert_longitude_to_180(ds_obs_norm, lon_name)
-    
-    if model_system != "[-180, 180]":
-        logger.info(f"Converting model longitude from {model_system} to [-180, 180]")
-        ds_model_norm = _convert_longitude_to_180(ds_model_norm, lon_name)
-    
-    # Vérification finale
-    obs_lon_final = ds_obs_norm[lon_name].values
-    model_lon_final = ds_model_norm[lon_name].values
-    
-    logger.debug(f"Final longitude ranges:")
-    logger.debug(f"  - Obs: [{float(np.nanmin(obs_lon_final)):.3f}, {float(np.nanmax(obs_lon_final)):.3f}]")
-    logger.debug(f"  - Model: [{float(np.nanmin(model_lon_final)):.3f}, {float(np.nanmax(model_lon_final)):.3f}]")
-    
-    return ds_obs_norm, ds_model_norm
-
-
-def _detect_longitude_system(lon_min: float, lon_max: float) -> str:
-    """Détecte le système de coordonnées longitude basé sur les valeurs min/max."""
-    
-    # Système [0, 360]
-    if lon_min >= -5 and lon_max >= 355:  # Tolérance pour les arrondis
-        return "[0, 360]"
-    
-    # Système [-180, 180]
-    elif lon_min >= -185 and lon_max <= 185:  # Tolérance pour les arrondis
-        return "[-180, 180]"
-    
-    # Système mixte ou autre
-    elif lon_min < -5 and lon_max > 185:
-        return "mixed"
-    
-    else:
-        return "unknown"
-
-
-def _convert_longitude_to_180(ds: xr.Dataset, lon_name: str) -> xr.Dataset:
-    """
-    Convertit les longitudes de [0, 360] vers [-180, 180].
-    
-    Args:
-        ds: Dataset à convertir
-        lon_name: Nom de la coordonnée longitude
-        
-    Returns:
-        xr.Dataset: Dataset avec longitudes normalisées
-    """
-    ds_work = ds.copy()
-    
-    # Obtenir les longitudes
-    lon_data = ds_work[lon_name]
-    
-    # Conversion : lon > 180 devient lon - 360
-    lon_converted = xr.where(lon_data > 180, lon_data - 360, lon_data)
-    
-    # Remplacer dans le dataset
-    if lon_name in ds_work.coords:
-        ds_work = ds_work.assign_coords({lon_name: lon_converted})
-    elif lon_name in ds_work.data_vars:
-        ds_work[lon_name] = lon_converted
-    
-    # Trier par longitude si c'est une coordonnée/dimension
-    if lon_name in ds_work.dims:
-        ds_work = ds_work.sortby(lon_name)
-    
-    return ds_work
-
 
 # ----------------------------------  SUPEROBS par maillage modèle  -------------------------------------
 
 
 
-def stack_obs(ds_obs: xr.Dataset, lon_name: str = "lon", lat_name: str = "lat") -> xr.Dataset:
+def stack_obs(ds_obs: xr.Dataset) -> xr.Dataset:
     """Ensure observations are stacked into a single n_points dimension."""
     if "n_points" not in ds_obs.dims:
         ds_obs = ds_obs.stack(n_points=tuple(d for d in ds_obs.dims if d not in ("time",)))
@@ -247,22 +133,12 @@ def aggregate_superobs(
     Returns:
         result_ds: Dataset des superobs agrégés avec diagnostics.
     """
-    
-    # logger.debug(f"=== AGGREGATE_SUPEROBS DIAGNOSTIC ===")
-    # logger.debug(f"subset_ds type: {type(subset_ds)}")
-    # logger.debug(f"subset_ds dims: {subset_ds.dims}")
-    # logger.debug(f"subset_ds shape: {subset_ds.shape}")
-    # logger.debug(f"subset_ds coords: {list(subset_ds.coords.keys())}")
-    
     # Vérifier que les coordonnées d'index existent
     if "lat_idx" not in subset_ds.coords or "lon_idx" not in subset_ds.coords:
         raise ValueError("subset_ds must have 'lat_idx' and 'lon_idx' coordinates")
     
     lat_idx_coord = subset_ds["lat_idx"]
     lon_idx_coord = subset_ds["lon_idx"]
-    
-    # logger.debug(f"lat_idx_coord dims: {lat_idx_coord.dims}, shape: {lat_idx_coord.shape}")
-    # logger.debug(f"lon_idx_coord dims: {lon_idx_coord.dims}, shape: {lon_idx_coord.shape}")
     
     # Aplatir les coordonnées
     lat_idx_flat = lat_idx_coord.values.ravel()
@@ -280,11 +156,6 @@ def aggregate_superobs(
     
     # Aplatir les données
     data_flat = data_values.ravel()
-
-    # logger.debug(f"lat_idx_flat length: {len(lat_idx_flat)}")
-    # logger.debug(f"lon_idx_flat length: {len(lon_idx_flat)}")
-    # logger.debug(f"data_flat length: {len(data_flat)}")
-    
     # validation et correction des longueurs
     # Trouver la longueur commune (minimum)
     min_length = min(len(lat_idx_flat), len(lon_idx_flat), len(data_flat))
@@ -431,13 +302,6 @@ def superobs_binning(
         method: Aggregation ('mean', 'median', 'count').
     """
     try:
-
-        # logger.debug(f"=== DIAGNOSTIC SUPEROBS_BINNING ===")
-        # logger.debug(f"obs.coords: {list(obs.coords.keys())}")
-        # logger.debug(f"obs.dims: {list(obs.sizes.keys())}")
-        # logger.debug(f"model.coords: {list(model.coords.keys())}")
-        # logger.debug(f"Variable to bin: {var}")
-        
         if var not in obs.data_vars:
             raise ValueError(
                 f"Variable '{var}' not found in obs dataset. "
@@ -657,7 +521,7 @@ def interpolate_model_on_obs(
     method  = "pyinterp"
     obs_df[f"{variable}_model"] = np.nan
     if method == "pyinterp":
-        interp_vals = interpolate_with_pyinterp(model_da, obs_df, variable)
+        interp_vals = interpolate_with_pyinterp(model_da, obs_df)
     elif method == "kdtree":
         interp_vals = interpolate_with_kdtree(model_da, obs_df, variable)
     #elif method == "xesmf":
@@ -668,7 +532,7 @@ def interpolate_model_on_obs(
     return obs_df
 
 
-def interpolate_with_pyinterp(model_da: xr.DataArray, obs_df: pd.DataFrame, variable: str) -> pd.DataFrame:
+def interpolate_with_pyinterp(model_da: xr.DataArray, obs_df: pd.DataFrame) -> pd.DataFrame:
     """
     Interpole un champ du modèle (2D lat/lon ou 3D lat/lon/depth) sur les observations.
     
@@ -695,7 +559,7 @@ def interpolate_with_pyinterp(model_da: xr.DataArray, obs_df: pd.DataFrame, vari
         obs_points = obs_df[["lon", "lat"]].values
         interp_vals, _ = grid.inverse_distance_weighting(obs_points, k=4)
 
-    # cs 3d lon/lat/depth
+    # cas 3d lon/lat/depth
     elif {"depth", "lat", "lon"}.issubset(set(model_da.dims)):
         lon = model_da.lon.values
         lat = model_da.lat.values
@@ -712,8 +576,7 @@ def interpolate_with_pyinterp(model_da: xr.DataArray, obs_df: pd.DataFrame, vari
             raise ValueError("Observations need a 'depth' column for 3D interpolation")
 
         obs_points = obs_df[["lon", "lat", "depth"]].values
-        interp_vals, _ = grid.inverse_distance_weighting(obs_points, k=8)  # plus de voisins pour 3D
-        #obs_df[f"{variable}_model"] = interp_vals
+        interp_vals, _ = grid.inverse_distance_weighting(obs_points, k=8)
 
     else:
         raise ValueError(f"Unsupported dimensions for model data: {model_da.dims}")
@@ -925,8 +788,6 @@ def apply_binning(
     Returns:
         pd.DataFrame: DataFrame avec colonnes de bin ajoutées.
     """
-    #log_memory("START apply_binning")
-
     # Valeurs par défaut pour les bins
     default_bins = {
         "time": "1D",  # Binning temporel journalier
@@ -937,7 +798,7 @@ def apply_binning(
     if bin_specs is None:
         bin_specs = default_bins.copy()
     else:
-        # Complète avec les valeurs par défaut si manquantes
+        # Compléter avec les valeurs par défaut si manquantes
         for k, v in default_bins.items():
             if k not in bin_specs:
                 bin_specs[k] = v
@@ -977,8 +838,7 @@ def apply_binning(
         except Exception as e:
             print(f"[apply_binning] Erreur pour la dimension '{dim}': {e}")
             continue
-    
-    #log_memory("END apply_binning")
+
     return (df, groupby)
 
 # ----------------------------------  Scores avec xskillscore  -------------------------------------
@@ -1257,10 +1117,10 @@ class Class4Evaluator:
         all_scores = {}
 
         # Normalisation des systèmes de coordonnées
-        logger.debug("Step 1: Normalizing coordinate systems")
-        obs_ds, model_ds = detect_and_normalize_longitude_system(
-            obs_ds, model_ds, "lon"
-        )
+        logger.debug("Normalizing coordinate systems")
+        #obs_ds, model_ds = detect_and_normalize_longitude_system(
+        #    obs_ds, model_ds, "lon"
+        #)
         
         for var in variables:
             try:
@@ -1289,7 +1149,7 @@ class Class4Evaluator:
                     # Binning
                     obs_df, groupby_cols = apply_binning(obs_df, self.bin_specs)
                     if obs_df.empty:
-                        logger.warning(f"No observations found for variable {var}")
+                        logger.warning(f"Nb observations found for variable {var}")
                         continue
 
                     # Drop NaN rows for the variable

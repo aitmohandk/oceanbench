@@ -2,6 +2,8 @@
 """
 Distributed processing utilities for OceanBench
 """
+import logging
+from xmlrpc import client
 
 import numpy as np
 import os
@@ -39,7 +41,6 @@ class DatasetProcessor:
         self.client: Optional[Client] = None
         self.cluster = None
 
-
         # Création du répertoire temporaire
         self._temp_dir = tempfile.mkdtemp(prefix="apply_ufunc_executor_")
         logger.info(f"Created temporary directory: {self._temp_dir}")
@@ -51,9 +52,7 @@ class DatasetProcessor:
             self.client = client
             self._owns_client = False
         elif distributed:
-            # créer un cluster local dès l'init
-
-            # Configuration client anti-P2P
+            # Configuration client
             dask.config.set({
                 'distributed.p2p.storage.disk': False,
                 'distributed.scheduler.work-stealing': False,
@@ -74,11 +73,12 @@ class DatasetProcessor:
                 local_directory=self._temp_dir,
                 # protocol="tcp://",
                 processes=True,
-                dashboard_address=None,  # Désactiver dashboard
+                #dashboard_address=None,  # Désactiver dashboard
                 silence_logs=True,
             )
             self.client = Client(self.cluster)
             self._owns_client = True
+        self.silence_dask_worker_logs()
 
 
     def add_temp_file(self, file_path: str) -> None:
@@ -138,9 +138,9 @@ class DatasetProcessor:
                     if path_obj.is_file():
                         path_obj.unlink()
                         logger.debug(f"Deleted temp file: {file_path}")
-                    elif path_obj.is_dir():
-                        shutil.rmtree(path_obj)
-                        logger.debug(f"Deleted temp directory: {file_path}")
+                    #elif path_obj.is_dir():
+                    #    shutil.rmtree(path_obj)
+                    #    logger.debug(f"Deleted temp directory: {file_path}")
             except Exception as e:
                 logger.warning(f"Failed to delete temp file {file_path}: {e}")
         
@@ -148,13 +148,13 @@ class DatasetProcessor:
         self._temp_files_cache.clear()
         
         # Supprimer le répertoire temporaire principal
-        if self._temp_dir and Path(self._temp_dir).exists():
+        '''if self._temp_dir and Path(self._temp_dir).exists():
             try:
                 shutil.rmtree(self._temp_dir)
                 logger.info(f"Cleaned up temporary directory: {self._temp_dir}")
                 self._temp_dir = None
             except Exception as e:
-                logger.warning(f"Failed to cleanup temporary directory: {e}")
+                logger.warning(f"Failed to cleanup temporary directory: {e}")'''
 
 
     # context manager support
@@ -366,6 +366,39 @@ class DatasetProcessor:
             dask_gufunc_kwargs=dask_gufunc_kwargs,
         )
 
+    def scatter_data(
+        self, scatter_item: Any,
+        broadcast_item: Optional[bool] = True,
+    ):
+        return self.client.scatter(scatter_item, broadcast=broadcast_item)
+
+    def scatter_data_list(
+        self, scatter_list: List[Any],
+        broadcast_list: Optional[List[bool]] = None,
+    ):
+        scatter_items = []
+        if scatter_list is not None:
+            for scatter_item, broadcast_item in zip(scatter_list, broadcast_list):
+                scatter_items.append(
+                    self.client.scatter(scatter_item, broadcast=broadcast_item)
+                )
+        return scatter_items
+
+    def compute_delayed_tasks(
+        self, delayed_tasks: List[Any],
+        sync: Optional[bool] = False,
+    ) -> List[Any]:
+        """Compute a list of delayed tasks in parallel on workers."""
+        futures = self.client.compute(delayed_tasks, sync=sync)
+        results = self.client.gather(futures)
+        return results
+
+
+    @staticmethod
+    def cleanup_worker_memory():
+        """Fonction de nettoyage à exécuter sur chaque worker."""
+        import gc
+        gc.collect()
 
     def run_parallel_tasks_double(
         self, da1, da2, callable_fct,
@@ -589,8 +622,6 @@ class DatasetProcessor:
             tol_depth=tol_depth, mode="single"
         )
 
-
-
         if len(out_vars) == 0:
             raise RuntimeError("No metrics computed.")
 
@@ -718,3 +749,85 @@ class DatasetProcessor:
             raise ValueError(f"Unknown mode {output_mode}")
 
         return ds_out
+
+
+    def get_dataset_processor_workers(self, dataset_processor):
+        """Retourne le nombre de workers du DatasetProcessor."""
+        if hasattr(dataset_processor, 'client') and dataset_processor.client:
+            try:
+                workers_info = dataset_processor.client.scheduler_info()['workers']
+                return len(workers_info)
+            except:
+                return 0
+        return 0
+
+
+    def silence_dask_worker_logs(self, level: int = logging.WARNING) -> None:
+        """
+        Reduce verbosity of Dask worker logs (default: WARNING).
+        
+        Args:
+            level: Logging level to set (e.g., logging.ERROR, logging.WARNING).
+        """
+        
+        # Liste complète des loggers Dask à réduire
+        dask_loggers = [
+            "distributed.worker",
+            "distributed.scheduler", 
+            "distributed.comm",
+            "distributed.core",
+            "distributed.nanny",
+            "distributed.client",
+            "distributed.protocol",
+            "distributed.utils",
+            "distributed.batched",
+            "distributed.shuffle",
+            "distributed.sizeof",
+            "tornado.access",
+            "tornado.application", 
+            "tornado.general",
+            "asyncio",
+            "dask",
+            "dask.threaded",
+            "dask.local",
+            "dask.optimization",
+            "dask.array.core",
+            "dask.array.slicing",
+            "dask.distributed",
+            "fsspec.local",
+            "fsspec.compression",
+        ]
+        
+        # Appliquer le niveau de logging à tous les loggers
+        for logger_name in dask_loggers:
+            logger_obj = logging.getLogger(logger_name)
+            logger_obj.setLevel(level)
+            # Désactiver la propagation vers les loggers parents
+            logger_obj.propagate = False
+        
+        # Configuration additionnelle pour les workers via le client si disponible
+        if hasattr(self, 'client') and self.client is not None:
+            try:
+                # Configurer le logging sur tous les workers distants
+                def configure_worker_logging():
+                    import logging
+                    for logger_name in dask_loggers:
+                        logging.getLogger(logger_name).setLevel(level)
+                        logging.getLogger(logger_name).propagate = False
+                
+                # Exécuter sur tous les workers
+                self.client.run(configure_worker_logging)
+                
+            except Exception as e:
+                # Si l'exécution sur les workers échoue, continuer silencieusement
+                pass
+        
+        # Configuration globale Dask pour éviter les logs verbeux
+        import dask
+        dask.config.set({
+            'distributed.worker.daemon': False,
+            'distributed.admin.low-level-log-length': 0,
+            'distributed.admin.event-loop-monitor-interval': '10s',
+            'distributed.comm.timeouts.connect': '30s',
+            'distributed.comm.timeouts.tcp': '30s',
+        })
