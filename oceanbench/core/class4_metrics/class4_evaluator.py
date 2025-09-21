@@ -9,10 +9,12 @@ import numpy as np
 import dask.array as da
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
+from concurrent.futures import ThreadPoolExecutor
 import geopandas as gpd
 from loguru import logger
 import psutil
 import pyinterp
+import pyinterp.backends.xarray
 from scipy.spatial import cKDTree
 #import xesmf as xe
 import xskillscore as xs
@@ -95,7 +97,7 @@ def compute_grid_index(
     lon_idx = np.clip(lon_idx, 0, len(lon_model) - 1)
     lat_idx = np.clip(lat_idx, 0, len(lat_model) - 1)
 
-    # ✅ détection auto de la dimension des obs
+    # détection auto de la dimension des obs
     obs_dims = ds_obs[lon_name].dims
     if len(obs_dims) != 1:
         raise ValueError(
@@ -274,7 +276,6 @@ def make_superobs(
 ) -> xr.Dataset:
     """Pipeline: stack -> index -> aggregate."""
     try:
-        # ds_obs = stack_obs(ds_obs, lon_name, lat_name)
         ds_obs = compute_grid_index(ds_obs, ds_model, lon_name, lat_name)
         return aggregate_superobs(ds_obs, var_name, reduce=reduce, model=ds_model)
     except Exception as e:
@@ -463,46 +464,6 @@ def add_model_values(
     return df
 
 
-
-
-'''def match_times(model_ds: xr.Dataset, obs_df: pd.DataFrame, tol: str = "12H") -> pd.DataFrame:
-    """
-    Associe chaque observation à l'instant modèle le plus proche dans une tolérance donnée.
-    
-    Args:
-        model_ds: Dataset modèle avec une coordonnée "time".
-        obs_df: DataFrame/GeoDataFrame contenant une colonne "time".
-        tol: Tolérance temporelle (ex: "6H", "1D").
-
-    Returns:
-        DataFrame identique à obs_df mais avec une colonne supplémentaire "model_time".
-    """
-    import pandas as pd
-
-    model_times = pd.to_datetime(model_ds.time.values)
-    obs_times = pd.to_datetime(obs_df["time"].values)
-
-    matched_model_times = []
-    for t_obs in obs_times:
-        # Trouver le temps modèle le plus proche
-        idx = model_times.get_indexer([t_obs], method="nearest")[0]
-        t_model = model_times[idx]
-
-        # Vérifier la tolérance
-        if abs(t_model - t_obs) <= pd.Timedelta(tol):
-            matched_model_times.append(t_model)
-        else:
-            matched_model_times.append(pd.NaT)  # Pas de correspondance
-
-    obs_df["model_time"] = matched_model_times
-
-    # Supprimer les obs sans correspondance
-    obs_df = obs_df.dropna(subset=["model_time"]).reset_index(drop=True)
-
-    return obs_df'''
-
-
-
 # ----------------------------------  Interpolation modèle → obs  -------------------------------------
 
 def interpolate_model_on_obs(
@@ -531,65 +492,164 @@ def interpolate_model_on_obs(
     obs_df[f"{variable}_model"] = interp_vals
     return obs_df
 
-
-def interpolate_with_pyinterp(model_da: xr.DataArray, obs_df: pd.DataFrame) -> pd.DataFrame:
+def _nearest_index(values: np.ndarray, targets: np.ndarray) -> np.ndarray:
     """
-    Interpole un champ du modèle (2D lat/lon ou 3D lat/lon/depth) sur les observations.
-    
-    Args:
-        model_da: DataArray avec dimensions ('lat', 'lon') ou ('depth', 'lat', 'lon').
-        obs_df: DataFrame avec colonnes ['lon', 'lat'] et éventuellement ['depth'].
-        variable: Nom de la variable interpolée (sert à nommer la colonne de sortie).
-        
+    Return index of nearest value in sorted `values` for each element in `targets`.
+    Vectorized.
+    """
+    # values must be 1D sorted
+    idx = np.searchsorted(values, targets)
+    idx = np.clip(idx, 1, len(values)-1)
+    left = values[idx - 1]
+    right = values[idx]
+    choose_left = np.abs(targets - left) <= np.abs(right - targets)
+    return np.where(choose_left, idx - 1, idx)
+
+def interpolate_with_pyinterp(
+    model_da: xr.DataArray,
+    obs_df: pd.DataFrame,
+    n_threads: int = 4,
+    rtree_k: int = 4,
+) -> np.ndarray:
+    """
+    Memory-efficient interpolation of model_da on obs_df.
+    - builds Grid2D per (time_idx, depth_idx) pair and releases it immediately.
+    - groups obs by (time_idx, depth_idx) using numpy for low overhead.
+    - processes groups in batches to control peak memory.
+    Parameters:
+        model_da: xr.DataArray with dims lat, lon [, time, depth]
+        obs_df: pandas DataFrame with columns 'lon','lat' and optional 'time','depth'
+        n_threads: number of threads passed to pyinterp.bilinear; keep small to limit memory
+        batch_size: process at most this many obs indices per slice (to limit intermediate arrays)
+        rtree_k: k for IDW fallback
     Returns:
-        obs_df enrichi d'une colonne <variable>_model avec les valeurs interpolées.
+        interp_vals: numpy array of length len(obs_df)
     """
-    
-    # cs 2d lat/lon
-    if {"lat", "lon"}.issubset(set(model_da.dims)):
-        lon = model_da.lon.values
-        lat = model_da.lat.values
-        lon2d, lat2d = np.meshgrid(lon, lat)
-        points = np.column_stack([lon2d.ravel(), lat2d.ravel()])
-        values = model_da.values.ravel()
+    dims = set(model_da.dims)
+    has_time = "time" in dims
+    has_depth = "depth" in dims
 
-        grid = pyinterp.RTree()
-        grid.packing(points, values)
+    obs_df = obs_df.copy()  # keep caller df untouched
+    n_obs = len(obs_df)
+    interp_vals = np.full(n_obs, np.nan, dtype=float)
 
-        obs_points = obs_df[["lon", "lat"]].values
-        interp_vals, _ = grid.inverse_distance_weighting(obs_points, k=4)
+    # normalize obs time/depth columns
+    if has_time and "time" in obs_df.columns:
+        obs_df["time"] = pd.to_datetime(obs_df["time"])
+    if has_depth and "depth" in obs_df.columns:
+        obs_df["depth"] = obs_df["depth"].astype(float)
 
-    # cas 3d lon/lat/depth
-    elif {"depth", "lat", "lon"}.issubset(set(model_da.dims)):
-        lon = model_da.lon.values
-        lat = model_da.lat.values
-        depth = model_da.depth.values
+    # prepare time/depth arrays (numpy)
+    time_vals = model_da.time.values if has_time else None
+    depth_vals = model_da.depth.values if has_depth else None
 
-        lon3d, lat3d, depth3d = np.meshgrid(lon, lat, depth, indexing="xy")
-        points = np.column_stack([lon3d.ravel(), lat3d.ravel(), depth3d.ravel()])
-        values = model_da.values.ravel()
+    # compute nearest indices for each observation
+    # we'll produce a tuple key (t_idx, d_idx) where missing dimension is None
+    t_indices = None
+    d_indices = None
 
-        grid = pyinterp.RTree()
-        grid.packing(points, values)
+    if has_time:
+        # convert obs times to np.datetime64 array
+        obs_time_vals = obs_df["time"].values.astype("datetime64[ns]")
+        # nearest index vectorized
+        t_indices = _nearest_index(time_vals.astype("datetime64[ns]"), obs_time_vals)
+    if has_depth:
+        obs_depth_vals = obs_df["depth"].values.astype(float)
+        d_indices = _nearest_index(depth_vals.astype(float), obs_depth_vals)
 
-        if "depth" not in obs_df.columns:
-            raise ValueError("Observations need a 'depth' column for 3D interpolation")
+    # Build keys array of shape (n_obs, 2) with -1 for None
+    keys = np.zeros((n_obs, 2), dtype=np.int64)
+    keys[:, 0] = t_indices if t_indices is not None else -1
+    keys[:, 1] = d_indices if d_indices is not None else -1
 
-        obs_points = obs_df[["lon", "lat", "depth"]].values
-        interp_vals, _ = grid.inverse_distance_weighting(obs_points, k=8)
+    # Map unique keys -> indices in obs_df
+    # We will iterate over unique keys (but in memory-friendly order)
+    if n_obs == 0:
+        return interp_vals
+    # t=time, d=depth, i8=int64
+    structured = keys.view([("t", "i8"), ("d", "i8")]) 
+    uniq, inverse = np.unique(structured, return_inverse=True)
+    # uniq is array of shape (n_unique,), inverse maps obs -> uniq_idx
 
+    # produce groups: for each uniq_idx, list obs indices
+    # To avoid huge lists, we'll process uniq groups in batches
+    n_unique = len(uniq)
+
+    # helper to process one group key
+    def _process_key(uniq_idx: int) -> None:
+        # find obs indices for this group
+        obs_idx = np.nonzero(inverse == uniq_idx)[0]
+        if obs_idx.size == 0:
+            return
+        # compute t_idx, d_idx from uniq
+        t_idx = int(uniq[uniq_idx]["t"])
+        d_idx = int(uniq[uniq_idx]["d"])
+        t_idx = None if t_idx == -1 else t_idx
+        d_idx = None if d_idx == -1 else d_idx
+
+        # prepare model slice: use isel which returns a view
+        da_slice = model_da
+        if t_idx is not None:
+            da_slice = da_slice.isel(time=t_idx)
+        if d_idx is not None:
+            da_slice = da_slice.isel(depth=d_idx)
+        # ensure 2D lat/lon
+        slice_dims = tuple(da_slice.dims)
+        # if extra dims, reduce (take first index) - keeps memory small
+        for extra in [d for d in slice_dims if d not in ("lat", "lon")]:
+            da_slice = da_slice.isel({extra: 0})
+
+        # Build Grid2D from this slice
+        try:
+            grid = pyinterp.backends.xarray.Grid2D(da_slice)
+            # fetch obs points for this group
+            pts = obs_df.iloc[obs_idx][["lon", "lat"]].to_numpy()
+            # call bilinear
+            vals = pyinterp.bilinear(grid, lon=pts[:, 0], lat=pts[:, 1], bounds_error=False, num_threads=max(1, n_threads))
+            interp_vals[obs_idx] = vals
+            # delete grid asap
+            del grid
+        except Exception as e:
+            # fallback: build local RTree from numpy arrays of slice (build minimal arrays)
+            try:
+                lon = da_slice["lon"].values
+                lat = da_slice["lat"].values
+                # make sure small temporary arrays only
+                lon2d, lat2d = np.meshgrid(lon, lat)
+                points = np.column_stack([lon2d.ravel(), lat2d.ravel()])
+                values = da_slice.values.ravel()
+                tree = pyinterp.RTree()
+                tree.packing(points, values)
+                pts = obs_df.iloc[obs_idx][["lon", "lat"]].to_numpy()
+                vals_idw, _ = tree.inverse_distance_weighting(pts, k=rtree_k)
+                interp_vals[obs_idx] = vals_idw
+                del tree
+            except Exception as e2:
+                interp_vals[obs_idx] = np.nan
+        finally:
+            # force cleanup
+            gc.collect()
+
+    # Process groups in small batches to limit memory peaks
+    # Optionally use a tiny thread pool if CPU-bound but be careful with memory
+    if n_threads is None or n_threads <= 1:
+        for u in range(n_unique):
+            _process_key(u)
     else:
-        raise ValueError(f"Unsupported dimensions for model data: {model_da.dims}")
+        # process in chunks with a limited worker pool
+        # we won't submit all tasks at once to avoid memory blowup
+        chunk_size = max(1, min(64, n_unique))
+        for start in range(0, n_unique, chunk_size):
+            end = min(n_unique, start + chunk_size)
+            with ThreadPoolExecutor(max_workers=n_threads) as ex:
+                futures = [ex.submit(_process_key, u) for u in range(start, end)]
+                for f in futures:
+                    # we wait for completion and re-raise
+                    f.result()
+            # after each chunk, force collection
+            gc.collect()
 
     return interp_vals
-
-
-def _find_coord_name(da: xr.DataArray, candidates=("lat", "latitude", "nav_lat")) -> str:
-    """Return first coord/dim name matching candidates (case-insensitive) or raise."""
-    for name in list(da.coords) + list(da.dims):
-        if name.lower() in {c.lower() for c in candidates}:
-            return name
-    raise ValueError(f"No coordinate found among candidates {candidates}")
 
 
 def interpolate_with_kdtree(
@@ -633,14 +693,9 @@ def interpolate_with_kdtree(
             da = model_da.squeeze("time", drop=True)
     else:
         da = model_da
-
-    # Détecter les noms des coordonnées lat/lon
-    lat_name = _find_coord_name(da, candidates=("lat", "latitude", "nav_lat", "y"))
-    lon_name = _find_coord_name(da, candidates=("lon", "longitude", "nav_lon", "x"))
-
     # Extraire les arrays lat/lon
-    lat_vals = da.coords[lat_name].values
-    lon_vals = da.coords[lon_name].values
+    lat_vals = da.coords[obs_lat_col].values
+    lon_vals = da.coords[obs_lon_col].values
 
     # Construire la grille spatiale
     if lat_vals.ndim == 1 and lon_vals.ndim == 1:
@@ -742,8 +797,8 @@ def interpolate_with_kdtree(
                 data2d = data2d.T
             else:
                 try:
-                    if lat_name in slice_da.dims and lon_name in slice_da.dims:
-                        slice_da2 = slice_da.transpose(lat_name, lon_name)
+                    if obs_lat_col in slice_da.dims and obs_lon_col in slice_da.dims:
+                        slice_da2 = slice_da.transpose(obs_lat_col, obs_lon_col)
                         data2d = slice_da2.values
                     else:
                         raise ValueError
@@ -867,12 +922,11 @@ def compute_scores_xskillscore(
     Returns:
         DataFrame avec les scores calculés.
     """
-    #log_memory("START compute_scores_xskillscore")
     try:
         all_results = {}
         df = df.dropna(subset=[y_obs_col, y_pred_col])
 
-        if groupby:
+        if groupby is not None and len(groupby) > 0:
             grouped = df.groupby(groupby, observed=False)
         else:
             grouped = [(None, df)]
@@ -881,31 +935,36 @@ def compute_scores_xskillscore(
         bin_results = []
         for group_key, group_df in grouped:
             # Conversion en DataArray pour xskillscore
-            y_true = xr.DataArray(group_df[y_obs_col].values, dims="points")
+            y_obs = xr.DataArray(group_df[y_obs_col].values, dims="points")
             y_pred = xr.DataArray(group_df[y_pred_col].values, dims="points")
             group_result = {}
             for metric in metrics:
                 if metric == "rmsd":   # compatibilité Oceanbench
                     metric = "rmse"
-                func = XSKILL_METRICS.get(metric)
+                metric_func = XSKILL_METRICS.get(metric)
                 try:
                     # Gestion des poids si supporté
-                    if metric in ["rmse", "mae", "mse", "me", "median_absolute_error", "mean_squared_log_error", "r2", "mape", "smape"]:
+                    if metric in [
+                        "rmse", "mae", "mse", "me", "median_absolute_error",
+                        "mean_squared_log_error", "r2", "mape", "smape",
+                    ]:
                         if weights is not None:
-                            score = func(y_pred, y_true, dim="points", weights=xr.DataArray(weights.values, dims="points"))
+                            score = metric_func(
+                                y_pred, y_obs, dim="points",
+                                weights=xr.DataArray(weights.values, dims="points"))
                         else:
-                            score = func(y_pred, y_true, dim="points")
+                            score = metric_func(y_pred, y_obs, dim="points")
                     elif metric in ["pearson_r", "spearman_r"]:
-                        score = func(y_pred, y_true, dim="points")
+                        score = metric_func(y_pred, y_obs, dim="points")
                     elif metric == "crps_ensemble":
                         # Pour crps_ensemble, y_pred doit être (ensemble, points)
                         # Ici, on suppose que y_pred est déjà de la bonne forme
-                        score = func(y_pred, y_true, dim="points")
+                        score = metric_func(y_pred, y_obs, dim="points")
                     else:
-                        score = func(y_pred, y_true, dim="points")
+                        score = metric_func(y_pred, y_obs, dim="points")
                     # Extraire la valeur scalaire
                     if hasattr(score, "item"):
-                        group_result[metric] = score.item()
+                        group_result[metric] = score.values  #.item()
                     else:
                         group_result[metric] = float(score)
                 except Exception as e:
@@ -919,40 +978,32 @@ def compute_scores_xskillscore(
                 else:
                     group_result[groupby[0]] = group_key
             bin_results.append(group_result)
-        # all_results["by_bin"] = bin_results  # TODO : activate and process this
-        # 4. Score global (tous bins confondus)
-        y_true_all = xr.DataArray(df[y_obs_col].values, dims="points")
-        y_pred_all = xr.DataArray(df[y_pred_col].values, dims="points")
-        global_weights = None
-        if weights is not None:
-            global_weights = xr.DataArray(weights.loc[df.index].values, dims="points")
-        global_result = {}
-        for metric in metrics:
-            if metric == "rmsd":   # compatibilité Oceanbench
-                metric = "rmse"
-            func = XSKILL_METRICS.get(metric)
-            try:
-                if func is not None:
-                    if global_weights is not None and "weights" in func.__code__.co_varnames:
-                        score = func(y_pred_all, y_true_all, dim="points", weights=global_weights)
-                    else:
-                        score = func(y_pred_all, y_true_all, dim="points")
-                    global_result[metric] = float(score)
-                else:
-                    global_result[metric] = np.nan
-            except Exception as e:
-                global_result[metric] = np.nan
-        #for k in groupby:
-        #    global_result[k] = "ALL"
-        # scores_df = pd.concat([scores_df, pd.DataFrame([global_result])], ignore_index=True)
 
-        all_results["global"] = global_result
-        #log_memory("END compute_scores_xskillscore")
+        # 4. Score global (tous bins confondus)
+        df_bins = pd.DataFrame(bin_results)
+        metrics = [col for col in df_bins.columns if col not in ['lat_bin', 'lon_bin', 'time_bin', 'depth_bin']]
+        global_stats = {}
+        def to_float_scalar(x):
+            try:
+                if hasattr(x, "item"):
+                    return float(x.item())
+                return float(x)
+            except Exception:
+                return np.nan
+
+        for metric in metrics:
+            vals = df_bins[metric].apply(to_float_scalar)
+            global_stats[f"{metric}_mean"] = vals.mean()
+            global_stats[f"{metric}_median"] = vals.median()
+            global_stats[f"{metric}_std"] = vals.std()
+
+        all_results["per_bins"] = bin_results
+        all_results["global"] = global_stats
+
         return all_results
     except Exception as e:
         print(f"Error in Compute_scores_xskillscore: {e}")
         traceback.print_exc()
-
 
 
 # ----------------------------------  QC filtering  -------------------------------------
@@ -1012,35 +1063,72 @@ def apply_spatial_mask(df: pd.DataFrame, mask_fn: Callable[[pd.DataFrame], pd.Se
     return df[mask_fn(df)]
 
 
-def xr_dataset_to_dataframe(
-    ds: xr.Dataset, var: str,
-    include_geometry: bool = True,
-    data_type: str = "_obs",
+def xr_to_obs_dataframe(
+    obj: xr.Dataset | xr.DataArray,
+    include_geometry: bool = False,
+    coord_like: Optional[List[str]] = ["lat", "lon", "depth", "time"],
+    ocean_vars: Optional[List[str]] = None,
 ) -> pd.DataFrame:
     """
-    Converts an xarray.Dataset with observation points into a (Geo)DataFrame.
-
-    Args:
-        ds (xr.Dataset): Input dataset, with 'time', 'lat', 'lon' (and optionally 'depth').
-        var (str): Name of the variable to extract as observation.
-        include_geometry (bool): If True, returns a GeoDataFrame with geometry column.
-
-    Returns:
-        pd.DataFrame or gpd.GeoDataFrame: Flattened dataframe with all coordinates and variables.
+    Convert an xarray object (Dataset or DataArray) to a wide-format DataFrame.
+    
+    Works for gridded data, irregular profiles (e.g. Argo), and swath-type data.
+    Ensures that spatial/temporal coordinates (lat, lon, depth, time, etc.)
+    are included as DataFrame columns even if they are not explicit dimensions.
+    
+    Parameters
+    ----------
+    obj : xr.Dataset or xr.DataArray
+        Input xarray object.
+    
+    Returns
+    -------
+    pd.DataFrame
+        Wide-format DataFrame with one row per observation and columns:
+        - All dimension coordinates
+        - All "coordinate-like" variables (lat, lon, depth, time, ...)
+        - Data variables (if Dataset) or the single variable (if DataArray)
     """
-    #log_memory("START xr_dataset_to_dataframe") 
-    # Convert to DataFrame and reset index
-    df = ds.to_dataframe().reset_index()
+    # Normalize to Dataset
+    if isinstance(obj, xr.DataArray):
+        ds = obj.to_dataset(name=obj.name or "value")
+    else:
+        ds = obj
 
-    # Drop NaN rows for the variable, rename (var_obs or var_model)
-    if f"{var}_binned" in df.columns:
-        df = df.dropna(subset=[f"{var}_binned"])
-        df = df.rename(columns={f"{var}_binned": f"{var}_{data_type}"})
+    # Liste des dimensions à exclure
+    exclude_dims = {"n_points", "num_nadir", "num_points", "num_obs"}
 
-    # Add geometry column if requested and coordinates are present
+    # Récupérer les variables d'intérêt (coordonnées physiques)
+    coord_vars = []
+    for cname in coord_like:
+        if cname in ds.dims and cname not in exclude_dims:
+            coord_vars.append(cname)
+        elif cname in ds.coords and cname not in exclude_dims:
+            coord_vars.append(cname)
+        elif cname in ds.data_vars and cname not in exclude_dims:
+            coord_vars.append(cname)
+
+    # Récupérer les variables océaniques (dans data_vars)
+    if ocean_vars is None:
+        # Par défaut, toutes les data_vars sauf celles à exclure
+        ocean_vars = [v for v in ds.data_vars if v not in exclude_dims and v.lower() not in coord_like]
+
+    # Créer le subset
+    keep_vars = coord_vars + ocean_vars
+    keep_vars = list(dict.fromkeys(keep_vars))
+
+    subset = ds[keep_vars]
+
+    # Convert to DataFrame
+    df = subset.to_dataframe().reset_index()
+
+    # If DataArray with default name "value", rename for clarity
+    if isinstance(obj, xr.DataArray) and obj.name is None:
+        df = df.rename(columns={"value": "variable"})
+
     if include_geometry and {'lon', 'lat'}.issubset(df.columns):
         df = gpd.GeoDataFrame(df, geometry=gpd.points_from_xy(df.lon, df.lat), crs="EPSG:4326")
-    #log_memory("END xr_dataset_to_dataframe")
+
     return df
 
 
@@ -1115,12 +1203,6 @@ class Class4Evaluator:
             DataFrame with computed scores for each variable and bin.
         """
         all_scores = {}
-
-        # Normalisation des systèmes de coordonnées
-        logger.debug("Normalizing coordinate systems")
-        #obs_ds, model_ds = detect_and_normalize_longitude_system(
-        #    obs_ds, model_ds, "lon"
-        #)
         
         for var in variables:
             try:
@@ -1136,15 +1218,15 @@ class Class4Evaluator:
                     )
 
                 # Initialisation des colonnes de regroupement et des colonnes d'observation/modèle
-                groupby_cols = []  # Valeur par défaut
+                groupby_cols = []
                 obs_col = f"{var}_obs"
                 model_col = f"{var}_model"
 
                 # Interpolation du modèle sur les observations
                 if matching_type == "nearest":
                     # Convertir les observations en DataFrame
-                    obs_df = xr_dataset_to_dataframe(
-                        obs_da, var, include_geometry=True, data_type="obs"
+                    obs_df = xr_to_obs_dataframe(
+                        obs_da, include_geometry=False
                     )
                     # Binning
                     obs_df, groupby_cols = apply_binning(obs_df, self.bin_specs)
@@ -1164,8 +1246,13 @@ class Class4Evaluator:
                     superobs = make_superobs(obs_da, model_da, var, reduce="mean")
                     # Binning des obs sur la grille du modèle
                     obs_binned = superobs_binning(superobs, model_da, var=var)
-                    binned_df = xr_dataset_to_dataframe(
-                        obs_binned, var, include_geometry=True, data_type="obs"
+
+                    # Drop NaN rows for the variable, rename (var_obs or var_model)
+                    if f"{var}_binned" in df.columns:
+                        df = df.dropna(subset=[f"{var}_binned"])
+                        df = df.rename(columns={f"{var}_binned": f"{var}_obs"})
+                    binned_df = xr_to_obs_dataframe(
+                        obs_binned, include_geometry=False
                     )
                     # Ajout des valeurs modèle au dataframe
                     final_df = add_model_values(binned_df, model_da, var=var)

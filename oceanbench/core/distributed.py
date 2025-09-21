@@ -65,6 +65,7 @@ class DatasetProcessor:
                 'distributed.worker.daemon': False,
                 'distributed.admin.event-loop-monitor-interval': '8000ms',
             })
+
             self.cluster = LocalCluster(
                 n_workers=n_workers,
                 threads_per_worker=threads_per_worker,
@@ -74,11 +75,12 @@ class DatasetProcessor:
                 # protocol="tcp://",
                 processes=True,
                 #dashboard_address=None,  # Désactiver dashboard
-                silence_logs=True,
+                #silence_logs=True,
             )
             self.client = Client(self.cluster)
             self._owns_client = True
-        self.silence_dask_worker_logs()
+            logger.info(f"\n\n\n============= LINK TO DASHBOARD DASK : {self.client.dashboard_link} =============\n\n")
+            dask.config.set({'logging': {'distributed.worker': 'WARNING'}})
 
 
     def add_temp_file(self, file_path: str) -> None:
@@ -138,7 +140,7 @@ class DatasetProcessor:
                     if path_obj.is_file():
                         path_obj.unlink()
                         logger.debug(f"Deleted temp file: {file_path}")
-                    #elif path_obj.is_dir():
+                    #elif path_obj.is_dir():   # TODO : check temp file cleaning
                     #    shutil.rmtree(path_obj)
                     #    logger.debug(f"Deleted temp directory: {file_path}")
             except Exception as e:
@@ -147,7 +149,7 @@ class DatasetProcessor:
         # Vider le cache
         self._temp_files_cache.clear()
         
-        # Supprimer le répertoire temporaire principal
+        # Supprimer le répertoire temporaire principal   # TODO check this
         '''if self._temp_dir and Path(self._temp_dir).exists():
             try:
                 shutil.rmtree(self._temp_dir)
@@ -760,74 +762,3 @@ class DatasetProcessor:
             except:
                 return 0
         return 0
-
-
-    def silence_dask_worker_logs(self, level: int = logging.WARNING) -> None:
-        """
-        Reduce verbosity of Dask worker logs (default: WARNING).
-        
-        Args:
-            level: Logging level to set (e.g., logging.ERROR, logging.WARNING).
-        """
-        
-        # Liste complète des loggers Dask à réduire
-        dask_loggers = [
-            "distributed.worker",
-            "distributed.scheduler", 
-            "distributed.comm",
-            "distributed.core",
-            "distributed.nanny",
-            "distributed.client",
-            "distributed.protocol",
-            "distributed.utils",
-            "distributed.batched",
-            "distributed.shuffle",
-            "distributed.sizeof",
-            "tornado.access",
-            "tornado.application", 
-            "tornado.general",
-            "asyncio",
-            "dask",
-            "dask.threaded",
-            "dask.local",
-            "dask.optimization",
-            "dask.array.core",
-            "dask.array.slicing",
-            "dask.distributed",
-            "fsspec.local",
-            "fsspec.compression",
-        ]
-        
-        # Appliquer le niveau de logging à tous les loggers
-        for logger_name in dask_loggers:
-            logger_obj = logging.getLogger(logger_name)
-            logger_obj.setLevel(level)
-            # Désactiver la propagation vers les loggers parents
-            logger_obj.propagate = False
-        
-        # Configuration additionnelle pour les workers via le client si disponible
-        if hasattr(self, 'client') and self.client is not None:
-            try:
-                # Configurer le logging sur tous les workers distants
-                def configure_worker_logging():
-                    import logging
-                    for logger_name in dask_loggers:
-                        logging.getLogger(logger_name).setLevel(level)
-                        logging.getLogger(logger_name).propagate = False
-                
-                # Exécuter sur tous les workers
-                self.client.run(configure_worker_logging)
-                
-            except Exception as e:
-                # Si l'exécution sur les workers échoue, continuer silencieusement
-                pass
-        
-        # Configuration globale Dask pour éviter les logs verbeux
-        import dask
-        dask.config.set({
-            'distributed.worker.daemon': False,
-            'distributed.admin.low-level-log-length': 0,
-            'distributed.admin.event-loop-monitor-interval': '10s',
-            'distributed.comm.timeouts.connect': '30s',
-            'distributed.comm.timeouts.tcp': '30s',
-        })

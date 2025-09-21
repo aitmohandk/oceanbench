@@ -263,7 +263,7 @@ def _variable_and_depth_combinations(
     return list_combs
 
 
-def rmsd(
+def rmsd_legacy(
     dataset_processor: DatasetProcessor,
     challenger_datasets: List[xarray.Dataset],
     reference_datasets: List[xarray.Dataset],
@@ -314,15 +314,99 @@ def rmsd(
             for (variable, depth_level) in all_combinations
         }
 
-    '''scores = parallel_executor.apply_single(
-        ds_renamed, _compute_rmsd,
-        target_grid={"lat": target_grid['lat'], "lon": target_grid['lon']},
-        mode="zarr",
-    )'''
-
     LEAD_DAYS_COUNT = get_lead_days_count(challenger_datasets[0])
     score_dataframe = pandas.DataFrame(scores)
     score_dataframe.index = lead_day_labels(1, LEAD_DAYS_COUNT)
     print(score_dataframe.to_markdown())
     return score_dataframe.T
 
+
+
+def rmsd(
+    dataset_processor: DatasetProcessor,
+    challenger_datasets: List[xarray.Dataset],
+    reference_datasets: List[xarray.Dataset],
+    variables: List[Variable],
+    depth_levels: Optional[List[DepthLevel]] = DEPTH_LABELS,
+) -> pandas.DataFrame:
+    """ Calcule le RMSD entre des datasets challengers et de référence pour des variables et niveaux de profondeur donnés.
+    Args:
+        dataset_processor: Instance de DatasetProcessor pour le traitement distribué
+        challenger_datasets: Liste des datasets challengers
+        reference_datasets: Liste des datasets de référence
+        variables: Liste des variables à évaluer
+        depth_levels: Liste des niveaux de profondeur (ou None)
+    Returns:
+        pandas.DataFrame: DataFrame des scores RMSD
+    """
+
+    all_combinations = _variable_and_depth_combinations(
+        reference_datasets[0],
+        variables,
+        depth_levels,
+    )
+
+    if len(all_combinations) == 2:
+        variable = all_combinations[0]
+        depth_level = all_combinations[1]
+        
+        # Soumission de la tâche au client Dask
+        if dataset_processor.client is not None:
+            future = dataset_processor.client.submit(
+                _compute_rmsd,
+                challenger_datasets,
+                reference_datasets,
+                variable,
+                depth_level,
+            )
+            rmsd_result = future.result()  # Attendre le résultat
+        else:
+            # Fallback si pas de client Dask
+            rmsd_result = _compute_rmsd(
+                challenger_datasets,
+                reference_datasets,
+                variable,
+                depth_level,
+            )
+        
+        scores = {
+            _variale_depth_label(challenger_datasets[0], variable, depth_level): list(rmsd_result)
+        }
+    else:
+        # Soumission parallèle de toutes les tâches
+        if dataset_processor.client is not None:
+            futures = []
+            for (variable, depth_level) in all_combinations:
+                future = dataset_processor.client.submit(
+                    _compute_rmsd,
+                    challenger_datasets,
+                    reference_datasets,
+                    variable,
+                    depth_level,
+                )
+                futures.append((variable, depth_level, future))
+            
+            # Collecte des résultats
+            scores = {}
+            for variable, depth_level, future in futures:
+                rmsd_result = future.result()  # Attendre le résultat
+                scores[_variale_depth_label(challenger_datasets[0], variable, depth_level)] = list(rmsd_result)
+        else:
+            # Fallback si pas de client Dask
+            scores = {
+                _variale_depth_label(challenger_datasets[0], variable, depth_level): list(
+                    _compute_rmsd(
+                        challenger_datasets,
+                        reference_datasets,
+                        variable,
+                        depth_level,
+                    )
+                )
+                for (variable, depth_level) in all_combinations
+            }
+
+    LEAD_DAYS_COUNT = get_lead_days_count(challenger_datasets[0])
+    score_dataframe = pandas.DataFrame(scores)
+    score_dataframe.index = lead_day_labels(1, LEAD_DAYS_COUNT)
+    print(score_dataframe.to_markdown())
+    return score_dataframe.T
