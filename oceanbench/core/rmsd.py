@@ -323,7 +323,6 @@ def rmsd_legacy(
 
 
 def rmsd(
-    dataset_processor: DatasetProcessor,
     challenger_datasets: List[xarray.Dataset],
     reference_datasets: List[xarray.Dataset],
     variables: List[Variable],
@@ -339,7 +338,7 @@ def rmsd(
     Returns:
         pandas.DataFrame: DataFrame des scores RMSD
     """
-
+    dataset_processor = None
     all_combinations = _variable_and_depth_combinations(
         reference_datasets[0],
         variables,
@@ -374,7 +373,7 @@ def rmsd(
         }
     else:
         # Soumission parallèle de toutes les tâches
-        if dataset_processor.client is not None:
+        if dataset_processor is not None and dataset_processor.client is not None:
             futures = []
             for (variable, depth_level) in all_combinations:
                 future = dataset_processor.client.submit(
@@ -408,5 +407,5 @@ def rmsd(
     LEAD_DAYS_COUNT = get_lead_days_count(challenger_datasets[0])
     score_dataframe = pandas.DataFrame(scores)
     score_dataframe.index = lead_day_labels(1, LEAD_DAYS_COUNT)
-    print(score_dataframe.to_markdown())
+    # print(score_dataframe.to_markdown())
     return score_dataframe.T
