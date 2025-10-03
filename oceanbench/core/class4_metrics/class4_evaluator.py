@@ -595,32 +595,46 @@ def interpolate_with_pyinterp(
             da_slice = da_slice.isel(depth=d_idx)
         # ensure 2D lat/lon
         slice_dims = tuple(da_slice.dims)
+        horizontal_dims = ("x", "y") if ("x"  in slice_dims) and ("y" in slice_dims) else ("lon", "lat")
+        use_geodetic_dist = False if horizontal_dims == ("x", "y") else True
         # if extra dims, reduce (take first index) - keeps memory small
-        for extra in [d for d in slice_dims if d not in ("lat", "lon")]:
+        for extra in [d for d in slice_dims if d not in horizontal_dims]:
             da_slice = da_slice.isel({extra: 0})
+        
+        # Quick and dirty fix: if we're in the x/y case, drop all coords that are not x,y[,time,depth]
+        # TODO: Figure out why latitude and longitude are here in the first place in TOPAZ data (DC3)
+        if horizontal_dims == ("x", "y"):
+            coords_to_drop = [c for c in ["latitude", "longitude"] if c in da_slice.coords]
+            da_slice = da_slice.drop_vars(coords_to_drop)
 
         # Build Grid2D from this slice
         try:
-            grid = pyinterp.backends.xarray.Grid2D(da_slice)
+            grid = pyinterp.backends.xarray.Grid2D(da_slice, geodetic=use_geodetic_dist)
             # fetch obs points for this group
-            pts = obs_df.iloc[obs_idx][["lon", "lat"]].to_numpy()
-            # call bilinear
-            vals = pyinterp.bilinear(grid, lon=pts[:, 0], lat=pts[:, 1], bounds_error=False, num_threads=max(1, n_threads))
+            pts = obs_df.iloc[obs_idx][list(horizontal_dims)].to_numpy()
+            
+            # Call interpolator
+            vals = pyinterp.bivariate(
+                grid,
+                x = pts[:, 0], # lon if geodetic
+                y = pts[:, 1], # lat if geodetic
+                bounds_error=False,
+                num_threads=max(1, n_threads))
             interp_vals[obs_idx] = vals
             # delete grid asap
             del grid
         except Exception as e:
             # fallback: build local RTree from numpy arrays of slice (build minimal arrays)
             try:
-                lon = da_slice["lon"].values
-                lat = da_slice["lat"].values
+                lon = da_slice[horizontal_dims[0]].values
+                lat = da_slice[horizontal_dims[1]].values
                 # make sure small temporary arrays only
                 lon2d, lat2d = np.meshgrid(lon, lat)
                 points = np.column_stack([lon2d.ravel(), lat2d.ravel()])
                 values = da_slice.values.ravel()
                 tree = pyinterp.RTree()
                 tree.packing(points, values)
-                pts = obs_df.iloc[obs_idx][["lon", "lat"]].to_numpy()
+                pts = obs_df.iloc[obs_idx][list(horizontal_dims)].to_numpy()
                 vals_idw, _ = tree.inverse_distance_weighting(pts, k=rtree_k)
                 interp_vals[obs_idx] = vals_idw
                 del tree
