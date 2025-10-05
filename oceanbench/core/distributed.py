@@ -8,12 +8,14 @@ from xmlrpc import client
 import numpy as np
 import os
 from pathlib import Path 
+from tqdm import tqdm
 import xarray as xr
 import shutil
 import tempfile
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from dask.distributed import Client, LocalCluster
+from dask.distributed import Client, LocalCluster, as_completed, progress
+
 import dask
 from loguru import logger
 
@@ -391,8 +393,13 @@ class DatasetProcessor:
         sync: Optional[bool] = False,
     ) -> List[Any]:
         """Compute a list of delayed tasks in parallel on workers."""
+
         futures = self.client.compute(delayed_tasks, sync=sync)
-        results = self.client.gather(futures)
+        results = []
+        for future in tqdm(as_completed(futures), total=len(futures)):
+            results.append(future.result())
+        #progress(futures)
+        #results = self.client.gather(futures)
         return results
 
 

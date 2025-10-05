@@ -877,7 +877,7 @@ def apply_binning(
                     if dim == "depth":
                         unique_depths = np.unique(df[dim].dropna())
                         if len(unique_depths) > 1:
-                            bins = np.linspace(unique_depths.min(), unique_depths.max(), 10)
+                            bins = unique_depths
                         else:
                             continue  # Pas de binning possible
                     else:
@@ -1206,7 +1206,7 @@ class Class4Evaluator:
         
         for var in variables:
             try:
-                logger.info(f"Processing variable: {var}")
+                # logger.info(f"Processing variable: {var}")
                 obs_da = obs_ds[var]
                 model_da = model_ds[var]
                 
