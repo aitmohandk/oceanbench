@@ -176,12 +176,14 @@ def _compute_rmsd(
 def _variale_depth_label(dataset: xarray.Dataset, variable: Variable, depth_level: DepthLevel) -> str:
     if depth_level:
         return (
-            f"{DEPTH_LABELS[depth_level]} {VARIABLE_LABELS[variable]}"
+            f"{DEPTH_LABELS[depth_level]} {VARIABLE_LABELS[variable]}".capitalize()
             if _has_depths(dataset, variable)
-            else f"{DepthLevel.SURFACE} {VARIABLE_LABELS[variable]}"
+            else f"surface {VARIABLE_LABELS[variable]}".capitalize()
+            # else f"{DepthLevel.SURFACE} {VARIABLE_LABELS[variable]}"
         ).capitalize()
     else:
-        return f"{DepthLevel.SURFACE} {VARIABLE_LABELS[variable]}".capitalize()
+        # return f"{DepthLevel.SURFACE} {VARIABLE_LABELS[variable]}".capitalize()
+        return f"{VARIABLE_LABELS[variable]}".capitalize()
 
 
 def _has_depths_legacy(dataset: xarray.Dataset, variable: Variable) -> bool:
@@ -228,15 +230,18 @@ def _is_surface(depth_level: DepthLevel) -> bool:
 
 
 def _variable_and_depth_combinations(
-    dataset: xarray.Dataset, 
+    ref_dataset: xarray.Dataset, 
+    challenger_dataset: xarray.Dataset, 
     variables: list[Variable],
     depth_levels: Optional[List[DepthLevel]],
+    depth_dim: str = 'depth',
 ) -> list[tuple[Variable, DepthLevel]]:
     """
     Génère toutes les combinaisons (variable, depth_level) valides pour un dataset.
     
     Args:
-        dataset: Dataset xarray
+        ref_dataset: Dataset xarray de référence
+        challenger_dataset: Dataset xarray challenger
         variables: Liste des variables à évaluer
         depth_levels: Liste des niveaux de profondeur (peut être None)
     
@@ -245,13 +250,32 @@ def _variable_and_depth_combinations(
     """
     list_combs = []
     
+    def _depth_level_exists_in_dataset(dataset: xarray.Dataset, variable: Variable, depth_level: DepthLevel) -> bool:
+        """Vérifie si un depth_level existe dans la dimension depth d'une variable dans un dataset."""
+        try:
+            var_data = get_variable(dataset, variable)
+                
+            # Vérifier si la valeur du depth_level existe dans les coordonnées
+            depth_values = dataset[depth_dim].values
+            depth_level_value = depth_level.value  # Supposant que DepthLevel a un attribut .value
+            
+            # Tolérance pour les comparaisons de flottants
+            tolerance = 1e-3
+            return any(abs(float(dv) - float(depth_level_value)) < tolerance for dv in depth_values)
+            
+        except Exception as e:
+            logger.debug(f"Error checking depth level {depth_level} for variable {variable}: {e}")
+            return False
+    
     if depth_levels is not None:
         # Si des niveaux de profondeur sont spécifiés
         for variable in variables:
-            if _has_depths(dataset, variable):
-                # Variable avec profondeur : utiliser tous les depth_levels
+            if _has_depths(ref_dataset, variable) and _has_depths(challenger_dataset, variable):
+                # Variable avec profondeur : vérifier que chaque depth_level existe dans les deux datasets
                 for depth_level in depth_levels:
-                    list_combs.append((variable, depth_level))
+                    if (_depth_level_exists_in_dataset(ref_dataset, variable, depth_level) and 
+                        _depth_level_exists_in_dataset(challenger_dataset, variable, depth_level)):
+                        list_combs.append((variable, depth_level))
             else:
                 # Variable sans profondeur : utiliser None comme depth_level
                 list_combs.append((variable, None))
@@ -282,8 +306,8 @@ def rmsd_legacy(
     """
 
     all_combinations = _variable_and_depth_combinations(
-        # challenger_datasets[0],
         reference_datasets[0],
+        challenger_datasets[0],
         variables,
         depth_levels,
     )
@@ -341,6 +365,7 @@ def rmsd(
     dataset_processor = None
     all_combinations = _variable_and_depth_combinations(
         reference_datasets[0],
+        challenger_datasets[0],
         variables,
         depth_levels,
     )
@@ -403,9 +428,10 @@ def rmsd(
                 )
                 for (variable, depth_level) in all_combinations
             }
-
+    # return scores
     LEAD_DAYS_COUNT = get_lead_days_count(challenger_datasets[0])
     score_dataframe = pandas.DataFrame(scores)
     score_dataframe.index = lead_day_labels(1, LEAD_DAYS_COUNT)
     # print(score_dataframe.to_markdown())
-    return score_dataframe.T
+    score_dataframe = score_dataframe.T
+    return score_dataframe
