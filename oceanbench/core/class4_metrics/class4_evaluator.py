@@ -1146,6 +1146,191 @@ def xr_to_obs_dataframe(
     return df
 
 
+# ------------------------------------- Format output -------------------------------------------
+
+'''def format_class4_results(class4_results_df):
+    """
+    Extrait les résultats Class4 et les formate comme sample_results_grid.txt
+    
+    Args:
+        class4_results_df: DataFrame avec colonnes 'per_bins', 'global', 'variable'
+    
+    Returns:
+        pd.DataFrame: Résultats formatés par profondeur et variable
+    """
+    
+    # Mapping des profondeurs cibles (comme dans sample_results_grid.txt)
+    target_depths = {
+        'Surface': (0, 50),      # Premier bin = Surface
+        '50m': (45, 55),         # Autour de 50m
+        '200m': (180, 220),      # Autour de 200m
+        '550m': (500, 600)       # Autour de 550m
+    }
+    
+    results = []
+    
+    for _, row in class4_results_df.iterrows():
+        variable = row['variable']
+        per_bins = row['per_bins']
+        
+        if not per_bins:  # Si pas de résultats pour cette variable
+            continue
+        
+        # Vérifier si des bins de profondeur existent
+        has_depth_bins = any('depth_bin' in bin_data for bin_data in per_bins)
+        
+        if not has_depth_bins:
+            metric_name = next(iter(per_bins)) 
+            # Pas de bins de profondeur : toutes les variables sont "Surface"
+            # Calculer la moyenne des métriques sur tous les bins
+            rmse_values = [float(bin_data['rmse']) for bin_data in per_bins if 'rmse' in bin_data]
+            if rmse_values:
+                mean_rmse = np.mean(rmse_values)
+                results.append({
+                    'Metric': f"Surface {variable}",
+                    'Value': mean_rmse
+                })
+        else:
+            # Bins de profondeur existent : traitement normal
+            depth_rmse = {}
+            
+            for bin_data in per_bins:
+                if 'depth_bin' in bin_data and 'rmse' in bin_data:
+                    depth_interval = bin_data.get('depth_bin', None)
+                    rmse_value = float(bin_data['rmse'])
+                    
+                    # Associer à la profondeur cible correspondante
+                    depth_center = (depth_interval.left + depth_interval.right) / 2
+                    
+                    for depth_label, (min_depth, max_depth) in target_depths.items():
+                        if min_depth <= depth_center <= max_depth:
+                            if depth_label not in depth_rmse:
+                                depth_rmse[depth_label] = []
+                            depth_rmse[depth_label].append(rmse_value)
+                            break
+            
+            # Calculer les moyennes par profondeur pour cette variable
+            for depth_label in target_depths.keys():
+                if depth_label in depth_rmse:
+                    mean_rmse = np.mean(depth_rmse[depth_label])
+                    results.append({
+                        'Variable': f"{depth_label} {variable}",
+                        'Value': mean_rmse
+                    })
+    
+    # Créer le DataFrame final
+    if results:
+        df_results = pd.DataFrame(results)
+        df_results = df_results.set_index('Metric')
+        return df_results
+    else:
+        return pd.DataFrame()'''
+
+
+def format_class4_results(class4_results_df):
+    """
+    Extrait les résultats Class4 et les formate comme sample_results_grid.txt
+    
+    Args:
+        class4_results_df: DataFrame avec colonnes 'per_bins', 'global', 'variable'
+    
+    Returns:
+        pd.DataFrame: Résultats formatés par profondeur et variable
+    """
+    
+    # Mapping des profondeurs cibles (comme dans sample_results_grid.txt)
+    target_depths = {
+        'Surface': (0, 50),      # Premier bin = Surface
+        '50m': (45, 55),         # Autour de 50m
+        '200m': (180, 220),      # Autour de 200m
+        '550m': (500, 600)       # Autour de 550m
+    }
+    
+    results = []
+    
+    for _, row in class4_results_df.iterrows():
+        variable = row['variable']
+        per_bins = row['per_bins']
+        
+        if not per_bins:  # Si pas de résultats pour cette variable
+            continue
+        
+        # Vérifier si des bins de profondeur existent
+        has_depth_bins = any('depth_bin' in bin_data for bin_data in per_bins)
+        
+        if not has_depth_bins:
+            # Pas de bins de profondeur : toutes les variables sont "Surface"
+            # Accumuler toutes les valeurs de chaque métrique
+            metrics_values = {}
+            
+            for bin_data in per_bins:
+                # La première clé est le nom de la métrique
+                metric_name = next(iter(bin_data))
+                metric_value = bin_data[metric_name]
+                
+                if metric_name not in metrics_values:
+                    metrics_values[metric_name] = []
+                metrics_values[metric_name].append(float(metric_value))
+            
+            # Calculer la moyenne pour chaque métrique
+            for metric_name, values in metrics_values.items():
+                if values:
+                    mean_value = np.mean(values)
+                    results.append({
+                        'Metric': metric_name,
+                        'Variable': f"Surface {variable}",
+                        'Value': mean_value
+                    })
+        else:
+            # Bins de profondeur existent : traitement normal par profondeur
+            # Organiser par métrique et par profondeur
+            metrics_by_depth = {}
+            
+            for bin_data in per_bins:
+                if 'depth_bin' not in bin_data:
+                    continue
+                    
+                # La première clé est le nom de la métrique
+                metric_name = next(iter(bin_data))
+                metric_value = bin_data[metric_name]
+                depth_interval = bin_data['depth_bin']
+                
+                # Calculer le centre de la profondeur
+                depth_center = (depth_interval.left + depth_interval.right) / 2
+                
+                # Associer à la profondeur cible correspondante
+                for depth_label, (min_depth, max_depth) in target_depths.items():
+                    if min_depth <= depth_center <= max_depth:
+                        if metric_name not in metrics_by_depth:
+                            metrics_by_depth[metric_name] = {}
+                        if depth_label not in metrics_by_depth[metric_name]:
+                            metrics_by_depth[metric_name][depth_label] = []
+                        
+                        metrics_by_depth[metric_name][depth_label].append(float(metric_value))
+                        break
+            
+            # Calculer les moyennes par métrique et par profondeur
+            for metric_name, depth_values in metrics_by_depth.items():
+                for depth_label, values in depth_values.items():
+                    if values:
+                        mean_value = np.mean(values)
+                        results.append({
+                            'Metric': metric_name,
+                            'Variable': f"{depth_label} {variable}",
+                            'Value': mean_value
+                        })
+    
+    # Créer le DataFrame final
+    if results:
+        df_results = pd.DataFrame(results)
+        # df_results = df_results.set_index('Metric')
+        return df_results
+    else:
+        return pd.DataFrame()
+
+
+
+
 # ----------------------------------  Main Class4Evaluator  -------------------------------------
 
 class Class4Evaluator:
@@ -1328,7 +1513,9 @@ class Class4Evaluator:
                     logger.warning(f"Non-DataFrame result found: {type(df)}")
             
             if valid_dataframes:
-                return pd.concat(valid_dataframes, ignore_index=True)
+                final_result = pd.concat(valid_dataframes, ignore_index=True)
+                grid_results = format_class4_results(final_result)
+                return grid_results
             else:
                 logger.warning("No valid DataFrames to concatenate")
                 return pd.DataFrame()  # DataFrame vide
