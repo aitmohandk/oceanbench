@@ -3,19 +3,34 @@
 # SPDX-License-Identifier: EUPL-1.2
 
 from functools import partial
+import os
 from typing import List, Optional
 
 from loguru import logger
+import gc
+import os
+
 import numpy as np
-import xarray
 import pandas
+import psutil
+import xarray
+
+def log_mem_state(context):
+    process = psutil.Process(os.getpid())
+    logger.info(f"[MEM][rmsd] {context} | RAM used: {psutil.virtual_memory().used/1e9:.2f} GB | Process: {process.memory_info().rss/1e6:.2f} MB | Open files: {len(process.open_files())}")
+
+# Lightweight, safe import of memory_profiler's decorator (no-op fallback)
+try:  # pragma: no cover - profiling aid only
+    from memory_profiler import profile  # type: ignore
+except Exception:  # pragma: no cover
+    def profile(func):
+        return func
 
 from oceanbench.core.distributed import DatasetProcessor
 from oceanbench.core.dataset_utils import (
     Variable,
     Dimension,
     DepthLevel,
-    get_length,
     get_variable,
     select_variable_day_and_depth,
     select_variable_day,
@@ -48,20 +63,21 @@ DEPTH_LABELS: dict[DepthLevel, str] = {
 }
 
 
+#@profile
 def _rmsd(data, reference_data):
     """
-    Calcul du RMSD entre deux arrays, en évitant les NaNs.
-    Version optimisée pour la performance.
+    Compute RMSD between two arrays, avoiding NaNs.
+    Version optimized for performance.
     Args:
         data: array-like (DataArray, Dataset, ndarray, dask array, etc.)
         reference_data: array-like (DataArray, Dataset, ndarray, dask array, etc.)
     Returns:
         float: RMSD value or np.nan if no valid data
     """
-    
-    # Conversion directe basée sur le type
+
+    # Direct conversion based on type
     def extract_values(obj):
-        """Extrait les valeurs numpy d'un objet de manière optimisée."""
+        """Extract numpy values from an object in an optimized way."""
         obj_type = type(obj).__name__
         
         if obj_type in ('DataArray', 'Dataset'):
@@ -71,7 +87,7 @@ def _rmsd(data, reference_data):
         elif obj_type in ('ndarray',):
             return obj
         else:
-            # Fallback pour autres types
+            # Fallback for other types
             return np.asarray(obj)
     
     # Extraction rapide des valeurs
@@ -82,34 +98,41 @@ def _rmsd(data, reference_data):
     data_flat = np.asarray(data_vals, dtype=np.float64).flatten()
     ref_flat = np.asarray(ref_vals, dtype=np.float64).flatten()
     
-    # Égalisation des tailles
+    # Equalize sizes
     min_size = min(data_flat.size, ref_flat.size)
     if data_flat.size != ref_flat.size:
         data_flat = data_flat[:min_size]
         ref_flat = ref_flat[:min_size]
     
-    # Masque vectorisé (plus rapide que two separate conditions)
+    # Vectorized mask (faster than two separate conditions)
     valid = ~(np.isnan(data_flat) | np.isnan(ref_flat))
     
     if not valid.any():
         return np.nan
     
-    # RMSD vectorisé
+    # Vectorized RMSD
     diff = data_flat[valid] - ref_flat[valid]
-    return np.sqrt(np.mean(diff * diff))  # Plus rapide que diff**2
+    rmsd_value = np.sqrt(np.mean(diff * diff))  # Plus rapide que diff**2
+    
+    # CRITICAL: Force cleanup of large arrays to prevent memory leaks
+    del data_flat, ref_flat, diff, valid, data_vals, ref_vals
+    gc.collect()  # Force garbage collection immediately
+    
+    return rmsd_value
 
 
 
+#@profile
 def _get_rmsd(challenger_dataset, reference_dataset, variable, depth_level, lead_day):
     """
-    Calcule le RMSD entre deux datasets pour une variable, un niveau de profondeur et un jour de prévision donnés.
-    Utilise une version optimisée de RMSD.
+    Compute RMSD between two datasets for a given variable, depth level and forecast day.
+    Uses an optimized RMSD version.
     Args:
-        challenger_dataset: Dataset xarray du challenger
-        reference_dataset: Dataset xarray de référence
-        variable: Variable à évaluer
-        depth_level: Niveau de profondeur (ou None pour surface)
-        lead_day: Jour de prévision (int)
+        challenger_dataset: Challenger xarray Dataset
+        reference_dataset: Reference xarray Dataset
+        variable: Variable to evaluate
+        depth_level: Depth level (or None for surface)
+        lead_day: Forecast day (int)
     Returns:
         float: RMSD value
     """
@@ -120,8 +143,14 @@ def _get_rmsd(challenger_dataset, reference_dataset, variable, depth_level, lead
         challenger_dataarray = select_variable_day(challenger_dataset, variable, lead_day)
         reference_dataarray = select_variable_day(reference_dataset, variable, lead_day)
     
-    # pas de .compute() ici - laisser _rmsd_optimized gérer
-    return _rmsd(challenger_dataarray, reference_dataarray)
+    # No .compute() here - let _rmsd_optimized handle it
+    rmsd_value = _rmsd(challenger_dataarray, reference_dataarray)
+    
+    # CRITICAL: Force cleanup of DataArrays
+    del challenger_dataarray, reference_dataarray
+    gc.collect()  # Force garbage collection immediately
+    
+    return rmsd_value
 
 
 def get_lead_days_count(dataset: xarray.Dataset) -> int:
@@ -129,6 +158,7 @@ def get_lead_days_count(dataset: xarray.Dataset) -> int:
     # forecasts are managed in dc-tools library
     return 1
 
+#@profile
 def _get_rmsd_for_all_lead_days(
     dataset: xarray.Dataset,
     reference_dataset: xarray.Dataset,
@@ -150,6 +180,7 @@ def _get_rmsd_for_all_lead_days(
     )
 
 
+#@profile
 def _compute_rmsd(
     datasets: List[xarray.Dataset],
     reference_datasets: List[xarray.Dataset],
@@ -170,7 +201,16 @@ def _compute_rmsd(
             )
         )
     )
-    return all_rmsd.mean(axis=0)
+    try:
+        result = all_rmsd.mean(axis=0)
+    finally:
+        # free large temporary array asap
+        try:
+            del all_rmsd
+        except Exception:
+            pass
+        gc.collect()
+    return result
 
 
 def _variale_depth_label(dataset: xarray.Dataset, variable: Variable, depth_level: DepthLevel) -> str:
@@ -195,27 +235,27 @@ def _has_depths_legacy(dataset: xarray.Dataset, variable: Variable) -> bool:
 
 def _has_depths(dataset: xarray.Dataset, variable: Variable) -> bool:
     """
-    Vérifie si une variable a une dimension de profondeur.
+    Check if a variable has a depth dimension.
     
     Args:
-        dataset: Dataset xarray
-        variable: Variable à tester
+        dataset: xarray Dataset
+        variable: Variable to test
         
     Returns:
-        bool: True si la variable a une dimension depth
+        bool: True if the variable has a depth dimension
     """
     try:
-        # Obtenir la variable
+        # Get the variable
         var_data = get_variable(dataset, variable)
         
-        # Liste des noms possibles pour la dimension depth
+        # List of possible names for the depth dimension
         depth_names = ['depth', 'z', 'lev', 'level', 'deptht', 'bottom']
         
-        # Vérifier si une dimension depth existe dans la variable
+        # Check if a depth dimension exists in the variable
         var_dims = list(var_data.dims)
         has_depth_dim = any(depth_name in var_dims for depth_name in depth_names)
         
-        # Vérifier aussi dans les coordonnées de la variable
+        # Also check in the variable's coordinates
         var_coords = list(var_data.coords)
         has_depth_coord = any(depth_name in var_coords for depth_name in depth_names)
         
@@ -237,29 +277,29 @@ def _variable_and_depth_combinations(
     depth_dim: str = 'depth',
 ) -> list[tuple[Variable, DepthLevel]]:
     """
-    Génère toutes les combinaisons (variable, depth_level) valides pour un dataset.
+    Generate all valid (variable, depth_level) combinations for a dataset.
     
     Args:
-        ref_dataset: Dataset xarray de référence
-        challenger_dataset: Dataset xarray challenger
-        variables: Liste des variables à évaluer
-        depth_levels: Liste des niveaux de profondeur (peut être None)
+        ref_dataset: Reference xarray Dataset
+        challenger_dataset: Challenger xarray Dataset
+        variables: List of variables to evaluate
+        depth_levels: List of depth levels (can be None)
     
     Returns:
-        Liste de tuples (Variable, DepthLevel ou None)
+        List of tuples (Variable, DepthLevel or None)
     """
     list_combs = []
     
     def _depth_level_exists_in_dataset(dataset: xarray.Dataset, variable: Variable, depth_level: DepthLevel) -> bool:
-        """Vérifie si un depth_level existe dans la dimension depth d'une variable dans un dataset."""
+        """Check if a depth_level exists in the depth dimension of a variable in a dataset."""
         try:
-            var_data = get_variable(dataset, variable)
-                
-            # Vérifier si la valeur du depth_level existe dans les coordonnées
+            get_variable(dataset, variable)  # Validate variable exists
+
+            # Check if the depth_level value exists in the coordinates
             depth_values = dataset[depth_dim].values
             depth_level_value = depth_level.value  # Supposant que DepthLevel a un attribut .value
             
-            # Tolérance pour les comparaisons de flottants
+            # Tolerance for floating-point comparisons
             tolerance = 1e-3
             return any(abs(float(dv) - float(depth_level_value)) < tolerance for dv in depth_values)
             
@@ -268,19 +308,19 @@ def _variable_and_depth_combinations(
             return False
     
     if depth_levels is not None:
-        # Si des niveaux de profondeur sont spécifiés
+        # If depth levels are specified
         for variable in variables:
             if _has_depths(ref_dataset, variable) and _has_depths(challenger_dataset, variable):
-                # Variable avec profondeur : vérifier que chaque depth_level existe dans les deux datasets
+                # Variable with depth: check that each depth_level exists in both datasets
                 for depth_level in depth_levels:
                     if (_depth_level_exists_in_dataset(ref_dataset, variable, depth_level) and 
                         _depth_level_exists_in_dataset(challenger_dataset, variable, depth_level)):
                         list_combs.append((variable, depth_level))
             else:
-                # Variable sans profondeur : utiliser None comme depth_level
+                # Variable without depth: use None as depth_level
                 list_combs.append((variable, None))
     else:
-        # Aucun niveau de profondeur spécifié : toutes les variables avec None
+        # No depth levels specified: all variables with None
         for variable in variables:
             list_combs.append((variable, None))
     
@@ -294,15 +334,15 @@ def rmsd_legacy(
     variables: List[Variable],
     depth_levels: Optional[List[DepthLevel]] = DEPTH_LABELS,
 ) -> pandas.DataFrame:
-    """ Calcule le RMSD entre des datasets challengers et de référence pour des variables et niveaux de profondeur donnés.
+    """Compute RMSD between challenger and reference datasets for given variables and depth levels.
     Args:
-        dataset_processor: Instance de DatasetProcessor pour le traitement distribué
-        challenger_datasets: Liste des datasets challengers
-        reference_datasets: Liste des datasets de référence
-        variables: Liste des variables à évaluer
-        depth_levels: Liste des niveaux de profondeur (ou None)
+        dataset_processor: DatasetProcessor instance for distributed processing
+        challenger_datasets: List of challenger datasets
+        reference_datasets: List of reference datasets
+        variables: List of variables to evaluate
+        depth_levels: List of depth levels (or None)
     Returns:
-        pandas.DataFrame: DataFrame des scores RMSD
+        pandas.DataFrame: DataFrame of RMSD scores
     """
 
     all_combinations = _variable_and_depth_combinations(
@@ -344,24 +384,31 @@ def rmsd_legacy(
     print(score_dataframe.to_markdown())
     return score_dataframe.T
 
+def log_memory(fct):
+    """Log memory usage of the current process."""
+    process = psutil.Process(os.getpid())
+    mem_mb = process.memory_info().rss / 1e6
+    print(f"[{fct}] Memory usage: {mem_mb:.2f} MB")
 
 
+#@profile
 def rmsd(
     challenger_datasets: List[xarray.Dataset],
     reference_datasets: List[xarray.Dataset],
     variables: List[Variable],
     depth_levels: Optional[List[DepthLevel]] = DEPTH_LABELS,
 ) -> pandas.DataFrame:
-    """ Calcule le RMSD entre des datasets challengers et de référence pour des variables et niveaux de profondeur donnés.
+    """Compute RMSD between challenger and reference datasets for given variables and depth levels.
     Args:
-        dataset_processor: Instance de DatasetProcessor pour le traitement distribué
-        challenger_datasets: Liste des datasets challengers
-        reference_datasets: Liste des datasets de référence
-        variables: Liste des variables à évaluer
-        depth_levels: Liste des niveaux de profondeur (ou None)
+        dataset_processor: DatasetProcessor instance for distributed processing
+        challenger_datasets: List of challenger datasets
+        reference_datasets: List of reference datasets
+        variables: List of variables to evaluate
+        depth_levels: List of depth levels (or None)
     Returns:
-        pandas.DataFrame: DataFrame des scores RMSD
+        pandas.DataFrame: DataFrame of RMSD scores
     """
+    # log_memory("Start rmsd")
     dataset_processor = None
     all_combinations = _variable_and_depth_combinations(
         reference_datasets[0],
@@ -374,7 +421,7 @@ def rmsd(
         variable = all_combinations[0]
         depth_level = all_combinations[1]
         
-        # Soumission de la tâche au client Dask
+        # Submit the task to the Dask client
         if dataset_processor.client is not None:
             future = dataset_processor.client.submit(
                 _compute_rmsd,
@@ -383,9 +430,9 @@ def rmsd(
                 variable,
                 depth_level,
             )
-            rmsd_result = future.result()  # Attendre le résultat
+            rmsd_result = future.result()  # Wait for result
         else:
-            # Fallback si pas de client Dask
+            # Fallback if no Dask client
             rmsd_result = _compute_rmsd(
                 challenger_datasets,
                 reference_datasets,
@@ -397,7 +444,7 @@ def rmsd(
             _variale_depth_label(challenger_datasets[0], variable, depth_level): list(rmsd_result)
         }
     else:
-        # Soumission parallèle de toutes les tâches
+        # Parallel submission of all tasks
         if dataset_processor is not None and dataset_processor.client is not None:
             futures = []
             for (variable, depth_level) in all_combinations:
@@ -410,13 +457,13 @@ def rmsd(
                 )
                 futures.append((variable, depth_level, future))
             
-            # Collecte des résultats
+            # Collect results
             scores = {}
             for variable, depth_level, future in futures:
-                rmsd_result = future.result()  # Attendre le résultat
+                rmsd_result = future.result()  # Wait for result
                 scores[_variale_depth_label(challenger_datasets[0], variable, depth_level)] = list(rmsd_result)
         else:
-            # Fallback si pas de client Dask
+            # Fallback if no Dask client
             scores = {
                 _variale_depth_label(challenger_datasets[0], variable, depth_level): list(
                     _compute_rmsd(
@@ -434,4 +481,5 @@ def rmsd(
     score_dataframe.index = lead_day_labels(1, LEAD_DAYS_COUNT)
     # print(score_dataframe.to_markdown())
     score_dataframe = score_dataframe.T
+    # log_memory("End rmsd")
     return score_dataframe

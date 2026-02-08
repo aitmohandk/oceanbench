@@ -4,10 +4,8 @@
 
 from enum import Enum
 # from huggingface_hub import DatasetCard
-from scipy import datasets
 import xarray
-from typing import Dict, Optional
-from loguru import logger
+from typing import Optional
 
 
 class StandardDimension(Enum):
@@ -62,7 +60,7 @@ def _get_variable_name_from_standard_name(dataset: xarray.Dataset | xarray.DataA
         if not var_std_name:
             var_std_name = dataset.attrs.get("std_name", '').lower()
         if var_std_name == standard_name:
-            # Pour un DataArray, le nom est dans .name
+            # For a DataArray, the name is in .name
             return str(dataset.name)
         return None
     else:

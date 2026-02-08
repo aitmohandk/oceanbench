@@ -2,9 +2,7 @@
 #
 # SPDX-License-Identifier: EUPL-1.2
 
-from loguru import logger
 import pandas
-from pandas import DataFrame
 import xarray
 
 from typing import List
@@ -13,7 +11,6 @@ from oceanbench.core.derived_quantities import add_mixed_layer_depth
 from oceanbench.core.derived_quantities import add_geostrophic_currents
 from oceanbench.core.rmsd import Variable, rmsd
 from oceanbench.core.references.glorys import glorys_datasets
-from oceanbench.core.dataset_utils import Variable
 from oceanbench.core.lagrangian_trajectory import (
     Zone,
     deviation_of_lagrangian_trajectories,

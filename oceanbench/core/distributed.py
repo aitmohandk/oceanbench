@@ -2,11 +2,7 @@
 """
 Distributed processing utilities for OceanBench
 """
-import logging
-from xmlrpc import client
-
 import numpy as np
-import os
 from pathlib import Path 
 from tqdm import tqdm
 import xarray as xr
@@ -14,7 +10,7 @@ import shutil
 import tempfile
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
-from dask.distributed import Client, LocalCluster, as_completed, progress
+from dask.distributed import Client, LocalCluster, as_completed
 
 import dask
 from loguru import logger
@@ -33,28 +29,28 @@ class DatasetProcessor:
         Parameters
         ----------
         client: Optional[dask.distributed.Client]
-            Si fourni, la classe réutilise ce client (ne le ferme pas).
+            If provided, the class reuses this client (does not close it).
         distributed: bool
-            Si True et client None -> crée un LocalCluster + Client géré par la classe.
+            If True and client is None -> creates a LocalCluster + Client managed by the class.
         n_workers, threads_per_worker: int
-            Paramètres du LocalCluster si créé automatiquement.
+            Parameters for LocalCluster if created automatically.
         """
         self._owns_client = False
         self.client: Optional[Client] = None
         self.cluster = None
 
-        # Création du répertoire temporaire
+        # Create temporary directory
         self._temp_dir = tempfile.mkdtemp(prefix="apply_ufunc_executor_")
         logger.info(f"Created temporary directory: {self._temp_dir}")
         
-        # Cache pour les fichiers temporaires
+        # Cache for temporary files
         self._temp_files_cache: List[str] = []
 
         if client is not None:
             self.client = client
             self._owns_client = False
         elif distributed:
-            # Configuration client
+            # Client configuration
             dask.config.set({
                 'distributed.p2p.storage.disk': False,
                 'distributed.scheduler.work-stealing': False,
@@ -76,21 +72,22 @@ class DatasetProcessor:
                 local_directory=self._temp_dir,
                 # protocol="tcp://",
                 processes=True,
-                #dashboard_address=None,  # Désactiver dashboard
+                #dashboard_address=None,  # Disable dashboard
                 #silence_logs=True,
             )
             self.client = Client(self.cluster)
             self._owns_client = True
             logger.info(f"\n\n\n============= LINK TO DASHBOARD DASK : {self.client.dashboard_link} =============\n\n")
-            dask.config.set({'logging': {'distributed.worker': 'WARNING'}})
+            # Enable cleaner logs but keep INFO to see memory warnings
+            dask.config.set({'logging': {'distributed.worker': 'INFO', 'distributed.nanny': 'INFO'}})
 
 
     def add_temp_file(self, file_path: str) -> None:
         """
-        Ajoute un fichier temporaire au cache pour nettoyage ultérieur.
+        Adds a temporary file to the cache for later cleanup.
         
         Args:
-            file_path (str): Chemin vers le fichier temporaire à enregistrer
+            file_path (str): Path to the temporary file to register
         """
         abs_path = str(Path(file_path).resolve())
         if abs_path not in self._temp_files_cache:
@@ -99,23 +96,23 @@ class DatasetProcessor:
 
     def create_temp_file(self, suffix: str = ".zarr", prefix: str = "temp_") -> str:
         """
-        Crée un fichier temporaire dans le répertoire temporaire et l'ajoute au cache.
+        Creates a temporary file in the temporary directory and adds it to the cache.
         
         Args:
-            suffix (str): Extension du fichier (par défaut ".zarr")
-            prefix (str): Préfixe du nom de fichier (par défaut "temp_")
+            suffix (str): File extension (default ".zarr")
+            prefix (str): File name prefix (default "temp_")
             
         Returns:
-            str: Chemin complet vers le fichier temporaire créé
+            str: Full path to the created temporary file
         """
         import uuid
         
-        # Génération d'un nom unique
+        # Generate a unique name
         unique_id = uuid.uuid4().hex[:8]
         filename = f"{prefix}{unique_id}{suffix}"
         temp_file_path = Path(self._temp_dir) / filename
         
-        # Ajouter au cache
+        # Add to cache
         self.add_temp_file(str(temp_file_path))
         
         logger.debug(f"Created temp file: {temp_file_path}")
@@ -123,18 +120,18 @@ class DatasetProcessor:
 
     def list_temp_files(self) -> List[str]:
         """
-        Retourne la liste des fichiers temporaires dans le cache.
+        Returns the list of temporary files in the cache.
         
         Returns:
-            List[str]: Liste des chemins des fichiers temporaires
+            List[str]: List of temporary file paths
         """
         return self._temp_files_cache.copy()
 
     def cleanup_temp_files(self) -> None:
         """
-        Supprime tous les fichiers temporaires du cache et le répertoire temporaire.
+        Deletes all temporary files from cache and the temporary directory.
         """
-        # Supprimer les fichiers individuels du cache
+        # Delete individual files from cache
         for file_path in self._temp_files_cache:
             try:
                 path_obj = Path(file_path)
@@ -148,10 +145,10 @@ class DatasetProcessor:
             except Exception as e:
                 logger.warning(f"Failed to delete temp file {file_path}: {e}")
         
-        # Vider le cache
+        # Clear cache
         self._temp_files_cache.clear()
         
-        # Supprimer le répertoire temporaire principal   # TODO check this
+        # Delete the main temporary directory   # TODO check this
         '''if self._temp_dir and Path(self._temp_dir).exists():
             try:
                 shutil.rmtree(self._temp_dir)
@@ -169,9 +166,9 @@ class DatasetProcessor:
         self.close()
 
     def close(self):
-        """Ferme le client/cluster si la classe les a créés."""
+        """Closes the client/cluster if the class created them."""
         try:
-            # Nettoyage des fichiers temporaires avant fermeture
+            # Cleanup of temporary files before closing
             self.cleanup_temp_files()
             if self._owns_client and self.client is not None:
                 self.client.close()
@@ -186,12 +183,12 @@ class DatasetProcessor:
 
     def __del__(self):
         """
-        Destructeur - nettoyage automatique à la destruction de l'instance.
+        Destructor - automatic cleanup upon instance destruction.
         """
         try:
             self.cleanup_temp_files()
         except Exception:
-            # Ignorer les erreurs dans le destructeur
+            # Ignore errors in the destructor
             pass
 
     # -----------------------------
@@ -199,7 +196,7 @@ class DatasetProcessor:
     # -----------------------------
     @staticmethod
     def _ensure_numpy(x):
-        """Retourne un numpy array pour une entrée x (DataArray ou array-like)."""
+        """Returns a numpy array for an input x (DataArray or array-like)."""
         if isinstance(x, xr.DataArray):
             return np.asarray(x.values)
         return np.asarray(x)
@@ -207,8 +204,8 @@ class DatasetProcessor:
     @staticmethod
     def _rechunk_for_apply(da: xr.DataArray, lat_name: str, lon_name: str):
         """
-        Rechunk pour que lat/lon soient single-chunk (core dims) et
-        time/depth chunk=1 pour que apply_ufunc fonctionne sur slices.
+        Rechunk so that lat/lon are single-chunk (core dims) and
+        time/depth chunk=1 so that apply_ufunc works on slices.
         """
         rechunk_spec = {}
         if lon_name in da.dims:
@@ -230,27 +227,27 @@ class DatasetProcessor:
         tol: float = 1e-3,
     ):
         """
-        Sélectionne la tranche la plus proche de target_depth.
-        Retourne (da_squeezed, actual_depth_scalar).
-        Si la variable n'a pas de dimension depth -> (da, None).
+        Selects the slice closest to target_depth.
+        Returns (da_squeezed, actual_depth_scalar).
+        If the variable has no depth dimension -> (da, None).
         """
         if depth_name not in da.dims:
             return da, None
 
-        # Récupérer toutes les profondeurs
+        # Retrieve all depths
         depth_vals = da.coords[depth_name].values.astype(float)
 
-        # Trouver la valeur la plus proche
+        # Find the closest value
         idx = int(np.abs(depth_vals - target_depth).argmin())
         actual = float(depth_vals[idx])
 
-        # Vérifier la tolérance
+        # Check tolerance
         if abs(actual - target_depth) > tol:
             raise ValueError(
                 f"No depth within tol={tol} of {target_depth}; closest={actual}"
             )
 
-        # Sélectionner et supprimer la dimension depth
+        # Select and drop the depth dimension
         sel = da.isel({depth_name: idx}).squeeze(drop=True)
 
         return sel, actual
@@ -305,11 +302,11 @@ class DatasetProcessor:
         """Rechunk dataset to uniform chunk sizes for Zarr compatibility."""
         new_chunks = {}
         for dim, sizes in ds.chunks.items():
-            # Si ce dim est déjà uniforme -> on garde
+            # If this dim is already uniform -> keep it
             if len(set(sizes)) == 1:
                 new_chunks[dim] = sizes[0]
             else:
-                # chunks irréguliers : on force à une taille fixe
+                # Irregular chunks: force to a fixed size
                 new_chunks[dim] = min(chunksize, max(sizes))
         return ds.chunk(new_chunks)
 
@@ -396,10 +393,50 @@ class DatasetProcessor:
 
         futures = self.client.compute(delayed_tasks, sync=sync)
         results = []
-        for future in tqdm(as_completed(futures), total=len(futures)):
-            results.append(future.result())
-        #progress(futures)
-        #results = self.client.gather(futures)
+        try:
+            for future in tqdm(as_completed(futures), total=len(futures)):
+                results.append(future.result())
+        finally:
+            # best-effort: cancel any remaining futures to release worker memory
+            try:
+                if hasattr(self, 'client') and self.client is not None:
+                    try:
+                        self.client.cancel(futures, force=True)
+                    except Exception:
+                        # individual cancel fallback
+                        for f in futures:
+                            try:
+                                f.cancel()
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+            # cleanup temporary files created during processing
+            try:
+                self.cleanup_temp_files()
+            except Exception:
+                pass
+
+            # Free references to futures and prompt GC to release memory
+            try:
+                try:
+                    del futures
+                except Exception:
+                    pass
+                import gc as _gc
+                _gc.collect()
+            except Exception:
+                pass
+
+            # free python references and force garbage collection
+            try:
+                del delayed_tasks
+            except Exception:
+                pass
+            import gc
+            gc.collect()
+
         return results
 
 
@@ -498,7 +535,7 @@ class DatasetProcessor:
             for t in (ds.time.values if has_time else [None]):
                 depth_slices_out = []
                 for z in (ds[depth_name].values if has_depth else [None]):
-                    # Sélection
+                    # Selection
                     sel_kwargs = {}
                     if t is not None:
                         sel_kwargs["time"] = t
@@ -638,7 +675,7 @@ class DatasetProcessor:
 
         # writing / returning according to mode
         if output_mode == "zarr":
-            # Utiliser le système de fichiers temporaires
+            # Use the temporary file system
             if output_path is None:
                 output_path = self.create_temp_file(suffix=".zarr", prefix="pairwise_")
                 logger.info(f"Using temporary file: {output_path}")
@@ -651,9 +688,15 @@ class DatasetProcessor:
             ds_out = ds_out.chunk(zarr_target_chunks)
             outp = Path(output_path)
             if outp.exists():
-                import shutil; shutil.rmtree(outp)
+                import shutil
+                shutil.rmtree(outp)
             ds_out.to_zarr(output_path, mode="w", consolidated=True)
             ds_out.close()
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
             ds_out = xr.open_zarr(output_path, chunks=zarr_target_chunks)
 
         elif output_mode == "lazy":
@@ -661,6 +704,11 @@ class DatasetProcessor:
 
         elif output_mode == "inmemory":
             ds_out = ds_out.compute()
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
 
         else:
             raise ValueError(f"Unknown mode {output_mode}")
@@ -730,7 +778,7 @@ class DatasetProcessor:
 
         # writing / returning according to mode
         if output_mode == "zarr":
-            # Utiliser le système de fichiers temporaires
+            # Use the temporary file system
             if output_path is None:
                 output_path = self.create_temp_file(suffix=".zarr", prefix="pairwise_")
             
@@ -746,6 +794,11 @@ class DatasetProcessor:
             logger.info(f"Saving dataset to temporary file: {output_path}")
             ds_out.to_zarr(output_path, mode="w", consolidated=True)
             ds_out.close()
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
             ds_out = xr.open_zarr(output_path, chunks=zarr_target_chunks)
 
         elif output_mode == "lazy":
@@ -753,6 +806,11 @@ class DatasetProcessor:
 
         elif output_mode == "inmemory":
             ds_out = ds_out.compute()
+            try:
+                import gc
+                gc.collect()
+            except Exception:
+                pass
 
         else:
             raise ValueError(f"Unknown mode {output_mode}")
@@ -761,11 +819,11 @@ class DatasetProcessor:
 
 
     def get_dataset_processor_workers(self, dataset_processor):
-        """Retourne le nombre de workers du DatasetProcessor."""
+        """Return the number of workers for the DatasetProcessor."""
         if hasattr(dataset_processor, 'client') and dataset_processor.client:
             try:
                 workers_info = dataset_processor.client.scheduler_info()['workers']
                 return len(workers_info)
-            except:
+            except Exception:
                 return 0
         return 0

@@ -8,8 +8,6 @@ import xarray as xr
 from xarray import Dataset
 import copernicusmarine
 import logging
-from loguru import logger
-
 logger = logging.getLogger("copernicusmarine")
 logger.setLevel(level=logging.WARNING)
 

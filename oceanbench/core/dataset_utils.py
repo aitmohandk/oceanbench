@@ -76,9 +76,9 @@ def get_dimension(dataset: xarray.Dataset, dimension: Dimension) -> xarray.DataA
     try:
         var_data = get_variable(dataset, variable)
     
-        # Vérifier si la dimension time existe et contient des valeurs
+        # Check if the time dimension exists and contains values
         if time_name and time_name in var_data.dims and var_data.sizes.get(time_name, 0) > 0:
-            # Vérifier que lead_day est dans les limites
+            # Check that lead_day is within bounds
             if lead_day < var_data.sizes[time_name]:
                 new_dataset = var_data.isel({time_name: lead_day})
             else:
@@ -88,7 +88,7 @@ def get_dimension(dataset: xarray.Dataset, dimension: Dimension) -> xarray.DataA
             # Pas de dimension time ou dimension vide, retourner la variable telle quelle
             new_dataset = var_data
         
-        # Appliquer la sélection de profondeur si applicable
+        # Apply depth selection if applicable
         if depth_name and depth_name in new_dataset.coords:
             new_dataset = new_dataset.sel({depth_name: depth_level.value})
             
@@ -96,7 +96,7 @@ def get_dimension(dataset: xarray.Dataset, dimension: Dimension) -> xarray.DataA
     except Exception as exception:
         try:
             start_datetime = datetime.fromisoformat(str(get_variable(dataset, variable)[0].values))
-        except:
+        except Exception:
             start_datetime = "unknown"
             
         details = (
@@ -117,7 +117,7 @@ def select_variable_day_and_depth(
     try:
         var_data = get_variable(dataset, variable)
     
-        # Sélection temporelle
+        # Time selection
         if time_name and time_name in var_data.dims and var_data.sizes.get(time_name, 0) > 0:
             if lead_day < var_data.sizes[time_name]:
                 new_dataset = var_data.isel({time_name: lead_day})
@@ -126,16 +126,16 @@ def select_variable_day_and_depth(
         else:
             new_dataset = var_data
         
-        # ✅ CORRECTION : Sélection de profondeur avec method="nearest"
+        # FIX: Depth selection with method="nearest"
         if depth_name and depth_name in new_dataset.coords:
-            # Utiliser method="nearest" pour trouver la valeur la plus proche
+            # Use method="nearest" to find the closest value
             new_dataset = new_dataset.sel({depth_name: depth_level.value}, method="nearest")
             
         return new_dataset
     except Exception as exception:
         try:
             start_datetime = datetime.fromisoformat(str(get_variable(dataset, variable)[0].values))
-        except:
+        except Exception:
             start_datetime = "unknown"
             
         details = (
@@ -154,9 +154,9 @@ def select_variable_day(
     try:
         var_data = get_variable(dataset, variable)
         
-        # Vérifier si la dimension time existe et contient des valeurs
+        # Check if the time dimension exists and contains values
         if time_name and time_name in var_data.dims and var_data.sizes.get(time_name, 0) > 0:
-            # Vérifier que lead_day est dans les limites
+            # Check that lead_day is within bounds
             if lead_day < var_data.sizes[time_name]:
                 new_dataset = var_data.isel({time_name: lead_day})
             else:
@@ -168,10 +168,10 @@ def select_variable_day(
             
         return new_dataset
     except Exception as exception:
-        # Essayer d'extraire les informations pour le message d'erreur
+        # Try to extract information for the error message
         try:
             start_datetime = datetime.fromisoformat(str(get_variable(dataset, variable)[0].values))
-        except:
+        except Exception:
             start_datetime = "unknown"
             
         details = (
@@ -190,17 +190,17 @@ def get_length(obj):
     elif isinstance(obj, np.ndarray):
         return obj.size if obj.ndim > 0 else 1
     elif isinstance(obj, (xarray.Dataset, xarray.DataArray)):
-        # Gestion spécifique pour xarray
+        # Specific handling for xarray
         try:
             return len(obj)
         except TypeError:
-            # Si c'est un scalaire ou 0-dimensionnel
+            # If it is a scalar or 0-dimensional
             return 1 if obj.ndim == 0 else obj.size
     elif hasattr(obj, '__len__'):
         try:
             return len(obj)
         except TypeError:
-            # L'objet a __len__ mais len() échoue (ex: scalaire NumPy, etc.)
+            # Object has __len__ but len() fails (e.g., NumPy scalar, etc.)
             return 1
     else:
         # Scalaire ou objet sans taille
