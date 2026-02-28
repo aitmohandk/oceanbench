@@ -41,7 +41,7 @@ class DatasetProcessor:
 
         # Create temporary directory
         self._temp_dir = tempfile.mkdtemp(prefix="apply_ufunc_executor_")
-        logger.info(f"Created temporary directory: {self._temp_dir}")
+        logger.debug(f"Created temporary directory: {self._temp_dir}")
         
         # Cache for temporary files
         self._temp_files_cache: List[str] = []
@@ -77,7 +77,6 @@ class DatasetProcessor:
             )
             self.client = Client(self.cluster)
             self._owns_client = True
-            logger.info(f"\n\n\n============= LINK TO DASHBOARD DASK : {self.client.dashboard_link} =============\n\n")
             # Enable cleaner logs but keep INFO to see memory warnings
             dask.config.set({'logging': {'distributed.worker': 'INFO', 'distributed.nanny': 'INFO'}})
 
