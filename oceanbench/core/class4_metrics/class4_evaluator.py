@@ -49,6 +49,222 @@ XSKILL_METRICS = {
     "bias": xs.me,  # alias
 }
 
+# Mapping from raw dataset variable names to human-friendly labels.
+# This mirrors the VARIABLE_LABELS dict in oceanbench/core/rmsd.py so that
+# observation-based reference datasets (SWOT, SARAL, JASON3, ARGO …) produce
+# the same label format as gridded references (GLORYS).
+# e.g.  "ssh" → "height"  →  "Surface height"  (not "Surface ssh")
+_CLASS4_VAR_FRIENDLY_LABELS: dict = {
+    # Sea surface height
+    "ssh": "height",
+    "zos": "height",
+    "sla": "height",
+    "adt": "height",
+    "ssha": "height",
+    # Temperature
+    "thetao": "temperature",
+    "sst": "temperature",
+    "temp": "temperature",
+    "TEMP": "temperature",
+    # Salinity
+    "so": "salinity",
+    "psal": "salinity",
+    "PSAL": "salinity",
+    # Velocities — raw NetCDF names
+    "uo": "eastward velocity",
+    "vo": "northward velocity",
+    "u": "eastward velocity",
+    "v": "northward velocity",
+    # Velocities — OCEANBENCH_VARIABLES alias keys
+    "u_current": "northward velocity",
+    "v_current": "eastward velocity",
+    "w_current": "upward velocity",
+}
+
+
+def _class4_var_label(variable: str) -> str:
+    """Return a human-friendly label for a variable name.
+
+    Falls back to the raw variable name when no mapping exists, so new
+    variables are still shown (unchanged) rather than crashing.
+    """
+    return _CLASS4_VAR_FRIENDLY_LABELS.get(variable, variable)
+
+
+# ── per-bin output helpers ────────────────────────────────────────────────────
+# Depth targets matching those used in format_class4_results (same boundaries)
+_TARGET_DEPTHS: dict = {
+    'Surface': (0, 50),
+    '50m': (45, 55),
+    '200m': (180, 220),
+    '550m': (500, 600),
+}
+
+
+def _lat_interval_to_label(lat_bin) -> str:
+    """Convert a lat_bin Interval or dict to a human-readable label like '80S-70S'."""
+    try:
+        if hasattr(lat_bin, 'left'):
+            lo, hi = float(lat_bin.left), float(lat_bin.right)
+        elif isinstance(lat_bin, dict) and 'left' in lat_bin:
+            lo, hi = float(lat_bin['left']), float(lat_bin['right'])
+        else:
+            return str(lat_bin)
+    except Exception:
+        return str(lat_bin)
+
+    def _side(v: float) -> str:
+        v = int(round(v))
+        if v < 0:
+            return f"{abs(v)}S"
+        elif v > 0:
+            return f"{v}N"
+        return "0"
+
+    return f"{_side(lo)}-{_side(hi)}"
+
+
+def _lon_interval_to_label(lon_bin) -> str:
+    """Convert a lon_bin Interval or dict to a human-readable label like '30W-0' or '0-30E'."""
+    try:
+        if hasattr(lon_bin, 'left'):
+            lo, hi = float(lon_bin.left), float(lon_bin.right)
+        elif isinstance(lon_bin, dict) and 'left' in lon_bin:
+            lo, hi = float(lon_bin['left']), float(lon_bin['right'])
+        else:
+            return str(lon_bin)
+    except Exception:
+        return str(lon_bin)
+
+    def _side(v: float) -> str:
+        v = int(round(v))
+        if v < 0:
+            return f"{abs(v)}W"
+        elif v > 0:
+            return f"{v}E"
+        return "0"
+
+    return f"{_side(lo)}-{_side(hi)}"
+
+
+def _build_per_bins_output(class4_results_df: "pd.DataFrame") -> dict:
+    """Reformat raw class4 per_bins into the standard output format.
+
+    Input bins (from the binning engine) have: lat_bin, lon_bin, depth_bin
+    (pandas Interval objects), rmse, mse, mae, bias, me, count.
+
+    Output format::
+
+        {
+            "Surface height": [{"lat_bin": "80S-70S", "lon_bin": "30W-0", "rmsd": 0.05, "n_points": 1234}, ...],
+            "200m temperature": [...],
+        }
+
+    Depth is encoded in the key; bins are crossed (lat_bin × lon_bin).
+    """
+    result: dict = {}
+
+    for _, row in class4_results_df.iterrows():
+        variable = row.get('variable', 'unknown')
+        per_bins = row.get('per_bins', [])
+        if not per_bins:
+            continue
+
+        has_depth = any('depth_bin' in b for b in per_bins)
+
+        if not has_depth:
+            # Surface-only variable — crossed (lat_bin, lon_bin)
+            latlon_acc: dict = {}
+            for b in per_bins:
+                lat_label = _lat_interval_to_label(b.get('lat_bin', 'global'))
+                lon_label = _lon_interval_to_label(b.get('lon_bin', 'global'))
+                n = int(b.get('count', 0))
+                try:
+                    rmse_val = float(b.get('rmse', float('nan')))
+                except (TypeError, ValueError):
+                    rmse_val = float('nan')
+                if n == 0 or rmse_val != rmse_val:
+                    continue
+                key_pair = (lat_label, lon_label)
+                if key_pair not in latlon_acc:
+                    latlon_acc[key_pair] = {'sum_sq_n': 0.0, 'n_total': 0}
+                latlon_acc[key_pair]['sum_sq_n'] += (rmse_val ** 2) * n
+                latlon_acc[key_pair]['n_total'] += n
+
+            key = f"Surface {_class4_var_label(str(variable))}"
+            bins = [
+                {
+                    'lat_bin': lbl[0],
+                    'lon_bin': lbl[1],
+                    'rmsd': float(np.sqrt(acc['sum_sq_n'] / acc['n_total'])),
+                    'n_points': acc['n_total'],
+                }
+                for lbl, acc in latlon_acc.items()
+                if acc['n_total'] > 0
+            ]
+            if bins:
+                result[key] = bins
+        else:
+            # Variable with depth — group by (depth_label, lat_bin, lon_bin)
+            depth_latlon_acc: dict = {}
+            for b in per_bins:
+                if 'depth_bin' not in b:
+                    continue
+                depth_bin = b['depth_bin']
+                try:
+                    if hasattr(depth_bin, 'left'):
+                        depth_center = (float(depth_bin.left) + float(depth_bin.right)) / 2
+                    elif isinstance(depth_bin, dict) and 'left' in depth_bin:
+                        depth_center = (float(depth_bin['left']) + float(depth_bin['right'])) / 2
+                    else:
+                        continue
+                except Exception:
+                    continue
+
+                depth_label = None
+                for dl, (dmin, dmax) in _TARGET_DEPTHS.items():
+                    if dmin <= depth_center <= dmax:
+                        depth_label = dl
+                        break
+                if depth_label is None:
+                    continue
+
+                lat_label = _lat_interval_to_label(b.get('lat_bin', 'global'))
+                lon_label = _lon_interval_to_label(b.get('lon_bin', 'global'))
+                n = int(b.get('count', 0))
+                try:
+                    rmse_val = float(b.get('rmse', float('nan')))
+                except (TypeError, ValueError):
+                    rmse_val = float('nan')
+                if n == 0 or rmse_val != rmse_val:
+                    continue
+
+                if depth_label not in depth_latlon_acc:
+                    depth_latlon_acc[depth_label] = {}
+                key_pair = (lat_label, lon_label)
+                if key_pair not in depth_latlon_acc[depth_label]:
+                    depth_latlon_acc[depth_label][key_pair] = {'sum_sq_n': 0.0, 'n_total': 0}
+                depth_latlon_acc[depth_label][key_pair]['sum_sq_n'] += (rmse_val ** 2) * n
+                depth_latlon_acc[depth_label][key_pair]['n_total'] += n
+
+            for depth_label, latlon_acc in depth_latlon_acc.items():
+                key = f"{depth_label} {_class4_var_label(str(variable))}"
+                bins = [
+                    {
+                        'lat_bin': lbl[0],
+                        'lon_bin': lbl[1],
+                        'rmsd': float(np.sqrt(acc['sum_sq_n'] / acc['n_total'])),
+                        'n_points': acc['n_total'],
+                    }
+                    for lbl, acc in latlon_acc.items()
+                    if acc['n_total'] > 0
+                ]
+                if bins:
+                    result[key] = bins
+
+    return result
+
+
 # Default mapping: variable → QC field name + valid flags
 DEFAULT_QC_MAPPING: Dict[str, Dict[str, List[int]]] = {
     "sea_surface_temperature": {"qc_variable": "quality_flag", "valid_flags": [0]},
@@ -1879,7 +2095,7 @@ def format_class4_results(class4_results_df):
                     mean_value = np.mean(values)
                     results.append({
                         'Metric': metric_name,
-                        'Variable': f"Surface {variable}",
+                        'Variable': f"Surface {_class4_var_label(variable)}",
                         'Value': mean_value
                     })
         else:
@@ -1923,7 +2139,7 @@ def format_class4_results(class4_results_df):
                         mean_value = np.mean(values)
                         results.append({
                             'Metric': metric_name,
-                            'Variable': f"{depth_label} {variable}",
+                            'Variable': f"{depth_label} {_class4_var_label(variable)}",
                             'Value': mean_value
                         })
     
@@ -2281,13 +2497,17 @@ class Class4Evaluator:
             
             if valid_dataframes:
                 final_result = pd.concat(valid_dataframes, ignore_index=True)
+                # Capture per_bins before format_class4_results consumes them.
+                per_bins_by_var = {}
+                if "per_bins" in final_result.columns:
+                    per_bins_by_var = _build_per_bins_output(final_result)
                 grid_results = format_class4_results(final_result)
                 # log_memory("Class4Evaluator 8")
-                return grid_results
+                return {"results": grid_results, "per_bins": per_bins_by_var}
             else:
                 logger.warning("No valid DataFrames to concatenate")
-                return pd.DataFrame()  # Empty DataFrame
+                return {"results": pd.DataFrame(), "per_bins": {}}
         else:
             logger.warning("No scores computed for any variable")
-            return pd.DataFrame()  # Empty DataFrame
+            return {"results": pd.DataFrame(), "per_bins": {}}
 
