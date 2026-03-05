@@ -49,10 +49,18 @@ XSKILL_METRICS = {
     "bias": xs.me,  # alias
 }
 
-# Mapping from raw dataset variable names to human-friendly labels.
-# This mirrors the VARIABLE_LABELS dict in oceanbench/core/rmsd.py so that
-# observation-based reference datasets (SWOT, SARAL, JASON3, ARGO …) produce
-# the same label format as gridded references (GLORYS).
+# Default mapping: variable → QC field name + valid flags
+DEFAULT_QC_MAPPING: Dict[str, Dict[str, List[int]]] = {
+    "sea_surface_temperature": {"qc_variable": "quality_flag", "valid_flags": [0]},
+    "sea_surface_salinity": {"qc_variable": "dqf", "valid_flags": [0, 1]},
+    "sea_surface_height": {"qc_variable": "quality_level", "valid_flags": [1, 2]},
+    "temperature": {"qc_variable": "qc_flag", "valid_flags": [0]},
+    "salinity": {"qc_variable": "qc_flag", "valid_flags": [0]},
+}
+
+
+# ── Friendly variable labels ────────────────────────────────────────────────────────────────────
+# Maps raw NC variable names to the same label format as gridded references.
 # e.g.  "ssh" → "height"  →  "Surface height"  (not "Surface ssh")
 _CLASS4_VAR_FRIENDLY_LABELS: dict = {
     # Sea surface height
@@ -91,7 +99,7 @@ def _class4_var_label(variable: str) -> str:
     return _CLASS4_VAR_FRIENDLY_LABELS.get(variable, variable)
 
 
-# ── per-bin output helpers ────────────────────────────────────────────────────
+# ── per-bin output helpers ─────────────────────────────────────────────────────────────────────
 # Depth targets matching those used in format_class4_results (same boundaries)
 _TARGET_DEPTHS: dict = {
     'Surface': (0, 50),
@@ -160,7 +168,7 @@ def _build_per_bins_output(class4_results_df: "pd.DataFrame") -> dict:
             "200m temperature": [...],
         }
 
-    Depth is encoded in the key; bins are crossed (lat_bin × lon_bin).
+    Depth is encoded in the key; bins are crossed (lat_bin x lon_bin).
     """
     result: dict = {}
 
@@ -263,16 +271,6 @@ def _build_per_bins_output(class4_results_df: "pd.DataFrame") -> dict:
                     result[key] = bins
 
     return result
-
-
-# Default mapping: variable → QC field name + valid flags
-DEFAULT_QC_MAPPING: Dict[str, Dict[str, List[int]]] = {
-    "sea_surface_temperature": {"qc_variable": "quality_flag", "valid_flags": [0]},
-    "sea_surface_salinity": {"qc_variable": "dqf", "valid_flags": [0, 1]},
-    "sea_surface_height": {"qc_variable": "quality_level", "valid_flags": [1, 2]},
-    "temperature": {"qc_variable": "qc_flag", "valid_flags": [0]},
-    "salinity": {"qc_variable": "qc_flag", "valid_flags": [0]},
-}
 
 
 def log_memory(fct):
@@ -2095,7 +2093,7 @@ def format_class4_results(class4_results_df):
                     mean_value = np.mean(values)
                     results.append({
                         'Metric': metric_name,
-                        'Variable': f"Surface {_class4_var_label(variable)}",
+                        'Variable': f"Surface {variable}",
                         'Value': mean_value
                     })
         else:
@@ -2139,7 +2137,7 @@ def format_class4_results(class4_results_df):
                         mean_value = np.mean(values)
                         results.append({
                             'Metric': metric_name,
-                            'Variable': f"{depth_label} {_class4_var_label(variable)}",
+                            'Variable': f"{depth_label} {variable}",
                             'Value': mean_value
                         })
     

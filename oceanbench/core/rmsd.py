@@ -213,8 +213,7 @@ def _compute_rmsd(
     return result
 
 
-# ── per-lat-bin / per-lon-bin helpers ──────────────────────────────────────
-# Default resolution (degrees).  Overridden at runtime by the
+# ── per-lat-bin helpers ────────────────────────────────────────────────────────
 # ``bin_resolution`` parameter threaded from the YAML config.
 _DEFAULT_BIN_RESOLUTION = 5
 
@@ -250,7 +249,7 @@ def _lon_bin_label(lon_min: float, lon_max: float) -> str:
 
 
 def _rmsd_per_lat_bin(challenger_da, reference_da, bin_resolution=None) -> list:
-    """Compute RMSD per crossed (lat × lon) bin between two DataArrays.
+    """Compute RMSD per crossed (lat x lon) bin between two DataArrays.
 
     Fully vectorized O(N) implementation using np.bincount — no nested loops.
 
@@ -266,18 +265,18 @@ def _rmsd_per_lat_bin(challenger_da, reference_da, bin_resolution=None) -> list:
     if bin_resolution is None:
         bin_resolution = _DEFAULT_BIN_RESOLUTION
     lat_edges, lon_edges = _make_bin_edges(bin_resolution)
-    # ── 1. Convert to numpy once ───────────────────────────────────────────
+    # 1. Convert to numpy once
     chall_vals = np.asarray(challenger_da.values, dtype=np.float64)
     ref_vals = np.asarray(reference_da.values, dtype=np.float64)
 
-    # ── 2. Find the latitude coordinate ───────────────────────────────────
+    # 2. Find the latitude coordinate
     lat_coord = None
     for name in ("latitude", "lat", "y"):
         if hasattr(challenger_da, "coords") and name in challenger_da.coords:
             lat_coord = name
             break
 
-    # ── 2b. Find the longitude coordinate ─────────────────────────────────
+    # 2b. Find the longitude coordinate
     lon_coord = None
     for name in ("longitude", "lon", "x"):
         if hasattr(challenger_da, "coords") and name in challenger_da.coords:
@@ -285,7 +284,7 @@ def _rmsd_per_lat_bin(challenger_da, reference_da, bin_resolution=None) -> list:
             break
 
     if lat_coord is None:
-        # No spatial coord – single global entry
+        # No spatial coord — single global entry
         valid = ~(np.isnan(chall_vals) | np.isnan(ref_vals))
         n = int(valid.sum())
         if n == 0:
@@ -293,7 +292,7 @@ def _rmsd_per_lat_bin(challenger_da, reference_da, bin_resolution=None) -> list:
         diff = chall_vals.ravel()[valid.ravel()] - ref_vals.ravel()[valid.ravel()]
         return [{"lat_bin": "global", "lon_bin": "global", "rmsd": float(np.sqrt(np.mean(diff * diff))), "n_points": n}]
 
-    # ── 3. Broadcast lat to the full data shape ────────────────────────────
+    # 3. Broadcast lat to the full data shape
     lat_1d = challenger_da.coords[lat_coord].values
     dims = list(challenger_da.dims)
     lat_dim_idx = dims.index(lat_coord)
@@ -303,7 +302,7 @@ def _rmsd_per_lat_bin(challenger_da, reference_da, bin_resolution=None) -> list:
     reshape_lat[lat_dim_idx] = len(lat_1d)
     lat_bcast = np.broadcast_to(lat_1d.reshape(reshape_lat), shape)
 
-    # ── 3b. Broadcast lon to the full data shape ──────────────────────────
+    # 3b. Broadcast lon to the full data shape
     has_lon = lon_coord is not None and lon_coord in dims
     if has_lon:
         lon_1d = challenger_da.coords[lon_coord].values
@@ -318,7 +317,7 @@ def _rmsd_per_lat_bin(challenger_da, reference_da, bin_resolution=None) -> list:
     ref_flat = ref_vals.ravel()
     valid = ~(np.isnan(chall_flat) | np.isnan(ref_flat))
 
-    # ── 4. Assign bin indices (np.digitize, single pass) ──────────────────
+    # 4. Assign bin indices (np.digitize, single pass)
     _lat_edges_arr = np.asarray(lat_edges, dtype=np.float64)
     n_lat_bins = len(_lat_edges_arr) - 1
     lat_bin_idx = np.digitize(lat_flat, _lat_edges_arr) - 1
@@ -334,7 +333,7 @@ def _rmsd_per_lat_bin(challenger_da, reference_da, bin_resolution=None) -> list:
         n_lon_bins = 1
         lon_bin_idx = np.zeros_like(lat_bin_idx)
 
-    # ── 5. Vectorised RMSD per bin via np.bincount (O(N)) ─────────────────
+    # 5. Vectorised RMSD per bin via np.bincount (O(N))
     # Combined 1-D bin index for the (lat, lon) grid
     combined_idx = lat_bin_idx * n_lon_bins + lon_bin_idx
     n_total_bins = n_lat_bins * n_lon_bins
@@ -369,8 +368,6 @@ def _rmsd_per_lat_bin(challenger_da, reference_da, bin_resolution=None) -> list:
             "rmsd": rmsd_val,
             "n_points": c,
         })
-
-    return bins
 
     return bins
 
@@ -615,20 +612,18 @@ def rmsd(
     variables: List[Variable],
     depth_levels: Optional[List[DepthLevel]] = DEPTH_LABELS,
     bin_resolution: Optional[int] = None,
-) -> pandas.DataFrame:
+) -> dict:
     """Compute RMSD between challenger and reference datasets for given variables and depth levels.
     Args:
+        dataset_processor: DatasetProcessor instance for distributed processing
         challenger_datasets: List of challenger datasets
         reference_datasets: List of reference datasets
         variables: List of variables to evaluate
         depth_levels: List of depth levels (or None)
-        bin_resolution: Spatial resolution (degrees) for per-bin breakdown.
-            None falls back to _DEFAULT_BIN_RESOLUTION.
     Returns:
         pandas.DataFrame: DataFrame of RMSD scores
     """
     # log_memory("Start rmsd")
-    dataset_processor = None
     all_combinations = _variable_and_depth_combinations(
         reference_datasets[0],
         challenger_datasets[0],
@@ -636,96 +631,49 @@ def rmsd(
         depth_levels,
     )
 
-    if len(all_combinations) == 2:
-        variable = all_combinations[0]
-        depth_level = all_combinations[1]
-        
-        # Submit the task to the Dask client
-        if dataset_processor.client is not None:
-            future = dataset_processor.client.submit(
-                _compute_rmsd,
-                challenger_datasets,
-                reference_datasets,
-                variable,
-                depth_level,
+    scores = {}
+    per_bins_by_var = {}
+    for (variable, depth_level) in all_combinations:
+        _label = _variale_depth_label(challenger_datasets[0], variable, depth_level)
+        _LEAD_DAYS = get_lead_days_count(challenger_datasets[0])
+        # Dataset[0], lead_day=0: load data once for both RMSD and per_bins
+        try:
+            _rmsd_ds0, _p_bins = _get_rmsd_and_per_bins(
+                challenger_datasets[0], reference_datasets[0],
+                variable, depth_level, lead_day=0,
+                bin_resolution=bin_resolution,
             )
-            rmsd_result = future.result()  # Wait for result
-        else:
-            # Fallback if no Dask client
-            rmsd_result = _compute_rmsd(
-                challenger_datasets,
-                reference_datasets,
-                variable,
-                depth_level,
+        except Exception as _pb_exc:
+            logger.warning(f"per_bins computation failed for {_label}: {_pb_exc}")
+            _rmsd_ds0 = _get_rmsd(
+                challenger_datasets[0], reference_datasets[0], variable, depth_level, 0
             )
-        
-        scores = {
-            _variale_depth_label(challenger_datasets[0], variable, depth_level): list(rmsd_result)
-        }
-    else:
-        # Parallel submission of all tasks
-        if dataset_processor is not None and dataset_processor.client is not None:
-            futures = []
-            for (variable, depth_level) in all_combinations:
-                future = dataset_processor.client.submit(
-                    _compute_rmsd,
-                    challenger_datasets,
-                    reference_datasets,
-                    variable,
-                    depth_level,
+            _p_bins = []
+        per_bins_by_var[_label] = _p_bins
+        # Build RMSD across all datasets / lead days
+        _rmsd_by_lead: list = [[] for _ in range(_LEAD_DAYS)]
+        _rmsd_by_lead[0].append(_rmsd_ds0)
+        for _ds_idx in range(1, len(challenger_datasets)):
+            _rmsd_by_lead[0].append(
+                _get_rmsd(
+                    challenger_datasets[_ds_idx], reference_datasets[_ds_idx],
+                    variable, depth_level, 0,
                 )
-                futures.append((variable, depth_level, future))
-            
-            # Collect results
-            scores = {}
-            for variable, depth_level, future in futures:
-                rmsd_result = future.result()  # Wait for result
-                scores[_variale_depth_label(challenger_datasets[0], variable, depth_level)] = list(rmsd_result)
-        else:
-            # Fallback: fused RMSD + per_bins loop (single data load per combo)
-            scores = {}
-            per_bins_by_var = {}
-            for (variable, depth_level) in all_combinations:
-                _label = _variale_depth_label(challenger_datasets[0], variable, depth_level)
-                _LEAD_DAYS = get_lead_days_count(challenger_datasets[0])
-                # Dataset[0], lead_day=0: load data once for both RMSD and per_bins
-                try:
-                    _rmsd_ds0, _p_bins = _get_rmsd_and_per_bins(
-                        challenger_datasets[0], reference_datasets[0],
-                        variable, depth_level, lead_day=0,
-                        bin_resolution=bin_resolution,
+            )
+        for _lead_day in range(1, _LEAD_DAYS):
+            for _ds_idx in range(len(challenger_datasets)):
+                _rmsd_by_lead[_lead_day].append(
+                    _get_rmsd(
+                        challenger_datasets[_ds_idx], reference_datasets[_ds_idx],
+                        variable, depth_level, _lead_day,
                     )
-                except Exception as _pb_exc:
-                    logger.warning(f"per_bins computation failed for {_label}: {_pb_exc}")
-                    _rmsd_ds0 = _get_rmsd(
-                        challenger_datasets[0], reference_datasets[0], variable, depth_level, 0
-                    )
-                    _p_bins = []
-                per_bins_by_var[_label] = _p_bins
-                # Build RMSD across all datasets / lead days
-                _rmsd_by_lead: list = [[] for _ in range(_LEAD_DAYS)]
-                _rmsd_by_lead[0].append(_rmsd_ds0)
-                for _ds_idx in range(1, len(challenger_datasets)):
-                    _rmsd_by_lead[0].append(
-                        _get_rmsd(
-                            challenger_datasets[_ds_idx], reference_datasets[_ds_idx],
-                            variable, depth_level, 0,
-                        )
-                    )
-                for _lead_day in range(1, _LEAD_DAYS):
-                    for _ds_idx in range(len(challenger_datasets)):
-                        _rmsd_by_lead[_lead_day].append(
-                            _get_rmsd(
-                                challenger_datasets[_ds_idx], reference_datasets[_ds_idx],
-                                variable, depth_level, _lead_day,
-                            )
-                        )
-                scores[_label] = [float(np.nanmean(vals)) for vals in _rmsd_by_lead]
+                )
+        scores[_label] = [float(np.nanmean(vals)) for vals in _rmsd_by_lead]
     # return scores
     LEAD_DAYS_COUNT = get_lead_days_count(challenger_datasets[0])
     score_dataframe = pandas.DataFrame(scores)
     score_dataframe.index = lead_day_labels(1, LEAD_DAYS_COUNT)
     # print(score_dataframe.to_markdown())
     score_dataframe = score_dataframe.T
-
+    # log_memory("End rmsd")
     return {"results": score_dataframe, "per_bins": per_bins_by_var}
