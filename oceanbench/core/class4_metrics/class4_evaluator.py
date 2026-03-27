@@ -1660,7 +1660,7 @@ def compute_scores_xskillscore(
     y_obs_col: str,
     y_pred_col: str,
     metrics: Optional[list] = None,
-    weights: Optional[pd.Series] = None,
+    weights: Optional[Union[pd.Series, str]] = None,
     groupby: Optional[list] = None,
     #binning: Optional[dict] = None,
 ) -> pd.DataFrame:
@@ -1684,8 +1684,24 @@ def compute_scores_xskillscore(
         all_results = {}
         df = df.dropna(subset=[y_obs_col, y_pred_col])
 
+        # weights can be:
+        #   - a str  → column name in df (recommended: survives dropna / groupby)
+        #   - a pd.Series aligned with df.index
+        #   - None   → unweighted
+        _weight_col: Optional[str] = None
+        if isinstance(weights, str) and weights in df.columns:
+            _weight_col = weights
+            weights = None  # will be extracted per-group below
+        elif isinstance(weights, pd.Series):
+            weights = weights.reindex(df.index)
+
         if groupby is not None and len(groupby) > 0:
-            grouped = df.groupby(groupby, observed=False)
+            # observed=True: only iterate over combinations that actually have
+            # data points.  observed=False would enumerate ALL Categorical
+            # combinations (up to 180×360 lat/lon bins × time bins = 64 800+
+            # empty groups) which causes severe performance degradation after
+            # the lat/lon coordinate rename fix enabled proper spatial binning.
+            grouped = df.groupby(groupby, observed=True)
         else:
             grouped = [(None, df)]
 
@@ -1706,10 +1722,16 @@ def compute_scores_xskillscore(
                         "rmse", "mae", "mse", "me", "median_absolute_error",
                         "mean_squared_log_error", "r2", "mape", "smape",
                     ]:
-                        if weights is not None:
+                        # Resolve per-group weights from column or Series
+                        _gw = None
+                        if _weight_col is not None:
+                            _gw = group_df[_weight_col].values
+                        elif weights is not None:
+                            _gw = weights.loc[group_df.index].values
+                        if _gw is not None:
                             score = metric_func(
                                 y_pred, y_obs, dim="points",
-                                weights=xr.DataArray(weights.values, dims="points"))
+                                weights=xr.DataArray(_gw, dims="points"))
                         else:
                             score = metric_func(y_pred, y_obs, dim="points")
                     elif metric in ["pearson_r", "spearman_r"]:
@@ -1720,9 +1742,13 @@ def compute_scores_xskillscore(
                         score = metric_func(y_pred, y_obs, dim="points")
                     else:
                         score = metric_func(y_pred, y_obs, dim="points")
-                    # Extract the scalar value
+                    # Extract the scalar value safely.
+                    # Use .item() rather than .values to always get a Python
+                    # scalar — numpy string scalars (np.str_) are str subclasses
+                    # that carry .item() but lack .values, which caused:
+                    #   AttributeError: 'str' object has no attribute 'values'
                     if hasattr(score, "item"):
-                        group_result[metric] = score.values  #.item()
+                        group_result[metric] = float(score.item())
                     else:
                         group_result[metric] = float(score)
                 except Exception as e:
