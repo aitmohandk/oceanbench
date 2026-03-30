@@ -1118,7 +1118,7 @@ def _nearest_index(values: np.ndarray, targets: np.ndarray) -> np.ndarray:
 def interpolate_with_pyinterp(
     model_da: xr.DataArray,
     obs_df: pd.DataFrame,
-    n_threads: int = 4,
+    n_threads: int = 0,
     rtree_k: int = 4,
     cache: Optional[Dict] = None,
 ) -> np.ndarray:
@@ -1130,13 +1130,17 @@ def interpolate_with_pyinterp(
     Parameters:
         model_da: xr.DataArray with dims lat, lon [, time, depth]
         obs_df: pandas DataFrame with columns 'lon','lat' and optional 'time','depth'
-        n_threads: number of threads passed to pyinterp.bilinear; keep small to limit memory
+        n_threads: number of threads passed to pyinterp.bilinear; 0 = read from
+            PYINTERP_NUM_THREADS env var (default 1)
         batch_size: process at most this many obs indices per slice (to limit intermediate arrays)
         rtree_k: k for IDW fallback
         cache: Optional dictionary to cache loaded model slices (Grid2D objects)
     Returns:
         interp_vals: numpy array of length len(obs_df)
     """
+    # When n_threads=0 (default), read from env var set by dctools worker caps.
+    if n_threads <= 0:
+        n_threads = int(os.environ.get('PYINTERP_NUM_THREADS', '1'))
     dims = set(model_da.dims)
     has_time = "time" in dims
     has_depth = "depth" in dims
@@ -1299,7 +1303,7 @@ def interpolate_with_pyinterp(
                 tree.packing(points, values)
                 if pts is None:
                     pts = obs_df.iloc[obs_idx][list(horizontal_dims)].to_numpy()
-                vals_idw, _ = tree.inverse_distance_weighting(pts, k=rtree_k)
+                vals_idw, _ = tree.inverse_distance_weighting(pts, k=rtree_k, num_threads=max(1, n_threads))
                 interp_vals[obs_idx] = vals_idw
             except Exception:
                 interp_vals[obs_idx] = np.nan

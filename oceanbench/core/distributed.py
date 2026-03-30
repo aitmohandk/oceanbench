@@ -54,6 +54,18 @@ class DatasetProcessor:
             self.client = client
             self._owns_client = False
         elif distributed:
+            # ── Cap BLAS thread pools BEFORE forking workers ──────────
+            # OpenBLAS reads these env vars at library-load time.  Workers
+            # forked by LocalCluster(processes=True) inherit the env, so
+            # numpy will initialise with 1 BLAS thread instead of cpu_count().
+            for _blas_var in (
+                "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                "OMP_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
+                "NUMEXPR_NUM_THREADS", "GOTO_NUM_THREADS",
+                "BLOSC_NTHREADS",
+            ):
+                os.environ.setdefault(_blas_var, "1")
+
             # Configuration client
             dask.config.set({
                 'distributed.p2p.storage.disk': False,
@@ -68,6 +80,7 @@ class DatasetProcessor:
                 'distributed.admin.event-loop-monitor-interval': '8000ms',
             })
 
+            import logging as _logging
             self.cluster = LocalCluster(
                 n_workers=n_workers,
                 threads_per_worker=threads_per_worker,
@@ -77,11 +90,19 @@ class DatasetProcessor:
                 # protocol="tcp://",
                 processes=True,
                 #dashboard_address=None,  # Désactiver dashboard
-                #silence_logs=True,
+                silence_logs=_logging.WARNING,
             )
             self.client = Client(self.cluster)
             self._owns_client = True
-            dask.config.set({'logging': {'distributed.worker': 'WARNING'}})
+            # Suppress INFO-level chatter from Dask internals.
+            # dask.config only affects Dask's own log setup; we must
+            # also set the stdlib loggers directly.
+            for _dask_logger_name in (
+                "distributed", "distributed.core",
+                "distributed.worker", "distributed.nanny",
+                "tornado.application",
+            ):
+                _logging.getLogger(_dask_logger_name).setLevel(_logging.WARNING)
 
 
     def add_temp_file(self, file_path: str) -> None:
