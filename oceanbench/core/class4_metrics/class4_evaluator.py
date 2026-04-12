@@ -1043,6 +1043,13 @@ def interpolate_grid_to_track_pyinterp(
         src_lat = da[lat_dim].values
         src_lon = da[lon_dim].values
 
+        logger.warning(
+            f"[grid2track] {var_name}: da.shape={da.shape}, "
+            f"dims={da.dims}, target_pts={output_dim_size}, "
+            f"dask-backed={hasattr(da.data, 'dask')}"
+        )
+        _t_ufunc = time.perf_counter()
+
         res = xr.apply_ufunc(
             _pyinterp_wrapper,
             da,
@@ -1056,6 +1063,10 @@ def interpolate_grid_to_track_pyinterp(
             dask_gufunc_kwargs={'allow_rechunk': True, 'output_sizes': {'points': output_dim_size}}
         )
         ds_out[var_name] = res
+        logger.warning(
+            f"[grid2track] {var_name}: apply_ufunc done in "
+            f"{time.perf_counter() - _t_ufunc:.1f}s"
+        )
 
     ds_out = ds_out.assign_coords(points=out_coords["points"])
     return ds_out
@@ -1073,6 +1084,7 @@ def interpolate_model_on_obs(
     if method == "pyinterp":
         # Attempt to use the new fast method if data is in xarray format
         # Otherwise fall back to the legacy internal method
+        _t0_interp = time.perf_counter()
         try:
              # Convert obs_df to minimal Dataset for the new function
             ds_obs = xr.Dataset.from_dataframe(obs_df[['lat', 'lon']])
@@ -1081,9 +1093,22 @@ def interpolate_model_on_obs(
             
             ds_interp = interpolate_grid_to_track_pyinterp(ds_model, ds_obs)
             interp_vals = ds_interp[variable].values
-        except Exception:
-            # logger.warning(f"Fast path failed, falling back to legacy")
+            logger.warning(
+                f"[interp] fast-path OK: {len(obs_df)} pts in "
+                f"{time.perf_counter() - _t0_interp:.1f}s"
+            )
+        except Exception as _exc_fast:
+            logger.warning(
+                f"[interp] fast-path failed after "
+                f"{time.perf_counter() - _t0_interp:.1f}s: "
+                f"{_exc_fast!r} — falling back to legacy"
+            )
+            _t0_legacy = time.perf_counter()
             interp_vals = interpolate_with_pyinterp(model_da, obs_df, cache=cache)
+            logger.warning(
+                f"[interp] legacy OK: {len(obs_df)} pts in "
+                f"{time.perf_counter() - _t0_legacy:.1f}s"
+            )
             
     elif method == "kdtree":
         interp_vals = interpolate_with_kdtree(model_da, obs_df, variable)
@@ -1203,6 +1228,12 @@ def interpolate_with_pyinterp(
     # produce groups: for each uniq_idx, list obs indices
     # To avoid huge lists, we'll process uniq groups in batches
     n_unique = len(uniq)
+
+    logger.warning(
+        f"[pyinterp] n_obs={n_obs}, n_unique_groups={n_unique}, "
+        f"has_time={has_time}, has_depth={has_depth}, "
+        f"n_threads={n_threads}"
+    )
 
     global _cache_hits, _cache_misses
     _cache_hits = 0
@@ -1324,9 +1355,17 @@ def interpolate_with_pyinterp(
 
     # Process groups in small batches to limit memory peaks
     # Optionally use a tiny thread pool if CPU-bound but be careful with memory
+    _t_groups_start = time.perf_counter()
     if n_threads is None or n_threads <= 1:
         for u in range(n_unique):
+            _t_key = time.perf_counter()
             _process_key(u)
+            _dt_key = time.perf_counter() - _t_key
+            if _dt_key > 5.0:
+                logger.warning(
+                    f"[pyinterp] group {u}/{n_unique} took {_dt_key:.1f}s "
+                    f"(t_idx={int(uniq[u]['t'])}, d_idx={int(uniq[u]['d'])})"
+                )
     else:
         # process in chunks with a limited worker pool
         # we won't submit all tasks at once to avoid memory blowup
@@ -1929,6 +1968,16 @@ def xr_to_obs_dataframe(
         
         n_points = subset.sizes[n_points_dim]
         
+        # Pre-compute the list of all columns to extract (data vars + coords).
+        # For datasets with a single n_points dimension, building a dict of
+        # numpy arrays and passing it to pd.DataFrame() is significantly
+        # faster than .to_dataframe().reset_index() which creates and then
+        # discards a MultiIndex.
+        _all_cols = list(keep_vars)
+        # Include the n_points dim itself if it is a coordinate (rare but possible)
+        if n_points_dim in subset.coords and n_points_dim not in _all_cols:
+            _all_cols.append(n_points_dim)
+        
         for chunk_idx, start_idx in enumerate(range(0, n_points, chunk_size)):
             end_idx = min(start_idx + chunk_size, n_points)
             
@@ -1940,10 +1989,18 @@ def xr_to_obs_dataframe(
             
             for retry in range(max_retries):
                 try:
-                    # Use synchronous scheduler to avoid Dask worker issues
-                    # We create a new context to ensure isolation
                     with dask.config.set(scheduler='synchronous'):
-                        chunk_df = chunk.to_dataframe().reset_index(drop=False)
+                        # Fast path: extract numpy arrays directly, skip
+                        # MultiIndex creation from to_dataframe().
+                        arrays = {}
+                        for _col in _all_cols:
+                            if _col in chunk:
+                                arrays[_col] = chunk[_col].values.ravel()
+                        if arrays:
+                            chunk_df = pd.DataFrame(arrays)
+                        else:
+                            # Fallback: use the standard path
+                            chunk_df = chunk.to_dataframe().reset_index(drop=False)
                     break
                 except (KeyError, Exception) as e:
                     if retry < max_retries - 1:
@@ -2288,14 +2345,24 @@ class Class4Evaluator:
 
                     # 2. Iterate chunks
                     chunk_gen = xr_to_obs_dataframe(obs_da, include_geometry=False, yield_chunks=True)
+                    _t_chunk_loop = time.perf_counter()
                     
                     for i, chunk_df in enumerate(chunk_gen):
+                        _t_chunk_start = time.perf_counter()
+                        _chunk_load_s = _t_chunk_start - _t_chunk_loop
                         if chunk_df.empty:
+                            _t_chunk_loop = time.perf_counter()
                             continue
                         
-                        # Create a copy to explicitly avoid SettingWithCopyWarning
-                        chunk_df = chunk_df.copy()
+                        logger.warning(
+                            f"[Class4] {var} chunk {i}: "
+                            f"{len(chunk_df)} rows, "
+                            f"load={_chunk_load_s:.1f}s"
+                        )
                         
+                        # xr_to_obs_dataframe returns a fresh DataFrame (not a view),
+                        # so no .copy() needed for in-place column additions.
+
                         # Apply Binning
                         chunk_df, current_groupby = apply_binning(chunk_df, self.bin_specs)
 
@@ -2307,22 +2374,26 @@ class Class4Evaluator:
                             # Try to find the data column (sometimes named "value" or "variable")
                             for col in ["value", "variable"]:
                                 if col in chunk_df.columns:
-                                    chunk_df = chunk_df.rename(columns={col: var})
+                                    chunk_df.rename(columns={col: var}, inplace=True)
                                     break
                         
                         if var not in chunk_df.columns:
                             continue 
                             
-                        chunk_df = chunk_df.dropna(subset=[var]).copy()
+                        chunk_df = chunk_df.dropna(subset=[var])
                         if chunk_df.empty:
                             continue
                         
-                        # Interpolate expects the variable column to exist in proper format
-                        # And typically interpolate_model_on_obs uses just coords
-                        
                         # Interpolate
+                        _t_interp = time.perf_counter()
                         chunk_df = interpolate_model_on_obs(
                             model_da, chunk_df, var, method=self.interp_method, cache=interp_cache
+                        )
+                        _dt_interp = time.perf_counter() - _t_interp
+                        logger.warning(
+                            f"[Class4] {var} chunk {i}: "
+                            f"interp={_dt_interp:.1f}s, "
+                            f"cache_size={len(interp_cache)}"
                         )
                         
                         # Limit memory usage by clearing cache if it grows too large
@@ -2331,17 +2402,16 @@ class Class4Evaluator:
                         if len(interp_cache) > 2: 
                             interp_cache.clear()
                         
-                        # Rename obs column for consistency
-                        chunk_df = chunk_df.rename(columns={var: f"{var}_obs"})
-                        
-                        # Filter NaNs in Model and Obs
-                        chunk_df = chunk_df.dropna(subset=[f"{var}_model", f"{var}_obs"])
+                        # Filter NaNs in Model and Obs — use var directly
+                        # (skip rename to f"{var}_obs" — avoids DataFrame copy)
+                        _model_col = f"{var}_model"
+                        chunk_df = chunk_df.dropna(subset=[_model_col, var])
                         if chunk_df.empty:
                             continue
                         
-                        # Calculate Errors
-                        obs_val = chunk_df[f"{var}_obs"].values
-                        mod_val = chunk_df[f"{var}_model"].values
+                        # Calculate Errors directly from numpy arrays
+                        obs_val = chunk_df[var].values
+                        mod_val = chunk_df[_model_col].values
                         diff = mod_val - obs_val
 
                         # logger.info(f"Variable {var} Chunk {i}: size={len(chunk_df)}, binning={dt_bin:.2f}s, interp={dt_interp:.2f}s, total={dt_total:.2f}s")
@@ -2386,8 +2456,14 @@ class Class4Evaluator:
                             s["sum_abs"] += np.sum(np.abs(diff))
                             s["sum_err"] += np.sum(diff)
                             
+                        _dt_chunk_total = time.perf_counter() - _t_chunk_start
+                        logger.warning(
+                            f"[Class4] {var} chunk {i}: "
+                            f"total={_dt_chunk_total:.1f}s"
+                        )
                         del chunk_df, diff, obs_val, mod_val
                         gc.collect()
+                        _t_chunk_loop = time.perf_counter()
 
                     # Explicitly clear cache after processing all chunks for this variable
                     if interp_cache:

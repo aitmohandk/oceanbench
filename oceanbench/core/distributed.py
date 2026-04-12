@@ -78,6 +78,12 @@ class DatasetProcessor:
                 'array.chunk-size': '64MB',
                 'distributed.worker.daemon': False,
                 'distributed.admin.event-loop-monitor-interval': '8000ms',
+                # Worker-TTL: the scheduler kills a worker that hasn't sent
+                # a heartbeat within this window.  Default is 5 min, which is
+                # too short when tasks hold the GIL for long stretches
+                # (zarr/blosc decompression, pandas, pure-Python loops).
+                # 15 min avoids false-positive "dead worker" kills.
+                'distributed.scheduler.worker-ttl': '900s',
             })
 
             import logging as _logging
