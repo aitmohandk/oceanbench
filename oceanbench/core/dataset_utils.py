@@ -57,6 +57,8 @@ class DepthLevel(Enum):
 
 
 def get_variable(dataset: xarray.Dataset, variable: Variable) -> xarray.DataArray:
+    if isinstance(variable, str):
+        return dataset[variable]
     return dataset[variable.variable_name_from_dataset(dataset)]
 
 

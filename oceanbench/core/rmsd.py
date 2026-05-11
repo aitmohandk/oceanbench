@@ -430,14 +430,14 @@ def _get_rmsd_and_per_bins(challenger_dataset, reference_dataset, variable, dept
 def _variale_depth_label(dataset: xarray.Dataset, variable: Variable, depth_level: DepthLevel) -> str:
     if depth_level:
         return (
-            f"{DEPTH_LABELS[depth_level]} {VARIABLE_LABELS[variable]}".capitalize()
+            f"{DEPTH_LABELS[depth_level]} {VARIABLE_LABELS.get(variable, str(variable))}".capitalize()
             if _has_depths(dataset, variable)
-            else f"surface {VARIABLE_LABELS[variable]}".capitalize()
+            else f"surface {VARIABLE_LABELS.get(variable, str(variable))}".capitalize()
             # else f"{DepthLevel.SURFACE} {VARIABLE_LABELS[variable]}"
         ).capitalize()
     else:
         # return f"{DepthLevel.SURFACE} {VARIABLE_LABELS[variable]}".capitalize()
-        return f"{VARIABLE_LABELS[variable]}".capitalize()
+        return f"{VARIABLE_LABELS.get(variable, str(variable))}".capitalize()
 
 
 def _has_depths_legacy(dataset: xarray.Dataset, variable: Variable) -> bool:
