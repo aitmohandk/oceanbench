@@ -58,6 +58,10 @@ def test_depth_labels_are_the_gridded_levels():
     # a deep level is reported at none of them; 50 m is no longer swallowed by "Surface"
     assert _depth_label(1245.291) is None
     assert _depth_label(10.0) is None
+    # point observations at their own depth: drogued drifters, Argo parking-depth drift
+    assert _depth_label(15.0) == "15m"
+    assert _depth_label(1000.0) == "1000m"
+    assert _depth_label(975.0) == "1000m" and _depth_label(900.0) is None
 
 
 def test_format_reports_each_depth_separately():

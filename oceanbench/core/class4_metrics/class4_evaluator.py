@@ -106,9 +106,11 @@ def _class4_var_label(variable: str) -> str:
 # interval that holds the level) is within DEPTH_TOLERANCE_M of it, or within 5 % of the level.
 _TARGET_DEPTHS: dict = {
     'Surface': 0.494025,
+    '15m': 15.0,       # drogued drifters (surface currents)
     '50m': 47.37369,
     '200m': 222.4752,
     '550m': 541.0889,
+    '1000m': 1000.0,   # Argo parking depth (velocities from float drift)
 }
 DEPTH_TOLERANCE_M = 2.0
 
