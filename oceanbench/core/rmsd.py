@@ -63,63 +63,76 @@ DEPTH_LABELS: dict[DepthLevel, str] = {
 }
 
 
-#@profile
-def _rmsd(data, reference_data):
+_LAT_NAMES = ("lat", "latitude", "nav_lat")
+
+
+def _area_weights(dataarray) -> Optional[np.ndarray]:
+    """cos(latitude) broadcast to ``dataarray``'s shape, or None when it has no latitude axis.
+
+    A regular lat/lon grid over-samples high latitudes: unweighted, a cell at 60 degN weighs twice
+    one at the equator. The weight of a cell is its area, proportional to cos(lat).
     """
-    Compute RMSD between two arrays, avoiding NaNs.
-    Version optimized for performance.
+    lat_dim = next((d for d in getattr(dataarray, "dims", ()) if d in _LAT_NAMES), None)
+    if lat_dim is None:
+        return None
+    lat = np.asarray(dataarray[lat_dim].values, dtype=np.float64)
+    w = np.cos(np.deg2rad(lat)).clip(min=0.0)
+    shape = [1] * dataarray.ndim
+    shape[dataarray.dims.index(lat_dim)] = lat.size
+    return np.broadcast_to(w.reshape(shape), dataarray.shape)
+
+
+#@profile
+def _rmsd(data, reference_data, area_weighted: bool = True):
+    """
+    RMSD between two fields on the same grid, over the points both have.
+
     Args:
         data: array-like (DataArray, Dataset, ndarray, dask array, etc.)
-        reference_data: array-like (DataArray, Dataset, ndarray, dask array, etc.)
+        reference_data: array-like, the same shape as ``data`` (DataArrays are put in the
+            dimension order of ``data`` first).
+        area_weighted: weight each point by cos(lat) (its cell area) when ``data`` has a
+            latitude dimension.
     Returns:
         float: RMSD value or np.nan if no valid data
+    Raises:
+        ValueError: the two fields do not have the same shape. (They used to be flattened and
+            the longer one truncated, which compares points that are not the same.)
     """
+    weights = None
+    if isinstance(data, xarray.DataArray) and isinstance(reference_data, xarray.DataArray):
+        if set(data.dims) == set(reference_data.dims):
+            reference_data = reference_data.transpose(*data.dims)
+        if area_weighted:
+            weights = _area_weights(data)
 
-    # Direct conversion based on type
-    def extract_values(obj):
-        """Extract numpy values from an object in an optimized way."""
-        obj_type = type(obj).__name__
-        
-        if obj_type in ('DataArray', 'Dataset'):
-            return obj.values
-        elif obj_type in ('dask.array.core.Array',):
-            return obj.compute()
-        elif obj_type in ('ndarray',):
-            return obj
-        else:
-            # Fallback for other types
-            return np.asarray(obj)
-    
-    # Extraction rapide des valeurs
-    data_vals = extract_values(data)
-    ref_vals = extract_values(reference_data)
-    
-    # Conversion en numpy float64
-    data_flat = np.asarray(data_vals, dtype=np.float64).flatten()
-    ref_flat = np.asarray(ref_vals, dtype=np.float64).flatten()
-    
-    # Equalize sizes
-    min_size = min(data_flat.size, ref_flat.size)
-    if data_flat.size != ref_flat.size:
-        data_flat = data_flat[:min_size]
-        ref_flat = ref_flat[:min_size]
-    
-    # Vectorized mask (faster than two separate conditions)
-    valid = ~(np.isnan(data_flat) | np.isnan(ref_flat))
-    
+    data_vals = np.asarray(getattr(data, "values", data), dtype=np.float64)
+    ref_vals = np.asarray(getattr(reference_data, "values", reference_data), dtype=np.float64)
+    if data_vals.shape != ref_vals.shape:
+        raise ValueError(
+            f"RMSD of fields of different shapes: {data_vals.shape} and {ref_vals.shape} "
+            f"(dims {getattr(data, 'dims', None)} and {getattr(reference_data, 'dims', None)}); "
+            "interpolate them onto the same grid first"
+        )
+
+    valid = np.isfinite(data_vals) & np.isfinite(ref_vals)
+    if weights is not None:
+        valid &= weights > 0
     if not valid.any():
         return np.nan
-    
-    # Vectorized RMSD
-    diff = data_flat[valid] - ref_flat[valid]
-    rmsd_value = np.sqrt(np.mean(diff * diff))  # Plus rapide que diff**2
-    
-    # CRITICAL: Force cleanup of large arrays to prevent memory leaks
-    del data_flat, ref_flat, diff, valid, data_vals, ref_vals
-    gc.collect()  # Force garbage collection immediately
-    
-    return rmsd_value
 
+    diff = data_vals[valid] - ref_vals[valid]
+    if weights is None:
+        rmsd_value = float(np.sqrt(np.mean(diff * diff)))
+    else:
+        w = weights[valid]
+        rmsd_value = float(np.sqrt(np.sum(w * diff * diff) / np.sum(w)))
+
+    # CRITICAL: Force cleanup of large arrays to prevent memory leaks
+    del data_vals, ref_vals, diff, valid, weights
+    gc.collect()  # Force garbage collection immediately
+
+    return rmsd_value
 
 
 #@profile

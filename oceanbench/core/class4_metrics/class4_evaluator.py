@@ -84,8 +84,8 @@ _CLASS4_VAR_FRIENDLY_LABELS: dict = {
     "u": "eastward velocity",
     "v": "northward velocity",
     # Velocities — OCEANBENCH_VARIABLES alias keys
-    "u_current": "northward velocity",
-    "v_current": "eastward velocity",
+    "u_current": "eastward velocity",
+    "v_current": "northward velocity",
     "w_current": "upward velocity",
 }
 
@@ -100,13 +100,110 @@ def _class4_var_label(variable: str) -> str:
 
 
 # ── per-bin output helpers ─────────────────────────────────────────────────────────────────────
-# Depth targets matching those used in format_class4_results (same boundaries)
+# The depths reported for profile observations: the GLORYS12 levels of the gridded scores
+# (oceanbench.core.dataset_utils.DepthLevel), so a Class 4 "50m temperature" and a gridded one are
+# the same level. A bin is reported under a label when its depth (a value, or the centre of an
+# interval that holds the level) is within DEPTH_TOLERANCE_M of it, or within 5 % of the level.
 _TARGET_DEPTHS: dict = {
-    'Surface': (0, 50),
-    '50m': (45, 55),
-    '200m': (180, 220),
-    '550m': (500, 600),
+    'Surface': 0.494025,
+    '50m': 47.37369,
+    '200m': 222.4752,
+    '550m': 541.0889,
 }
+DEPTH_TOLERANCE_M = 2.0
+
+
+def _depth_value(depth_bin) -> Optional[float]:
+    """The depth of a bin: a number, or the centre of an Interval / {'left', 'right'} dict."""
+    try:
+        if hasattr(depth_bin, 'left'):
+            return (float(depth_bin.left) + float(depth_bin.right)) / 2
+        if isinstance(depth_bin, dict) and 'left' in depth_bin:
+            return (float(depth_bin['left']) + float(depth_bin['right'])) / 2
+        return float(depth_bin)
+    except (TypeError, ValueError):
+        return None
+
+
+def _depth_label(depth_bin) -> Optional[str]:
+    """The reported depth label of a bin, or None when it is at none of the _TARGET_DEPTHS."""
+    if hasattr(depth_bin, 'left') or (isinstance(depth_bin, dict) and 'left' in depth_bin):
+        left = float(depth_bin.left if hasattr(depth_bin, 'left') else depth_bin['left'])
+        right = float(depth_bin.right if hasattr(depth_bin, 'right') else depth_bin['right'])
+        for label, level in _TARGET_DEPTHS.items():
+            if left <= level <= right:
+                return label
+    depth = _depth_value(depth_bin)
+    if depth is None:
+        return None
+    for label, level in _TARGET_DEPTHS.items():
+        if abs(depth - level) <= max(DEPTH_TOLERANCE_M, 0.05 * level):
+            return label
+    return None
+
+
+def _bin_weight(b: dict) -> float:
+    """What a bin weighs when bins are pooled: its sum of point weights, else its point count."""
+    for key in ('w_sum', 'count'):
+        try:
+            w = float(b.get(key, float('nan')))
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(w):
+            return w
+    return float('nan')
+
+
+def pool_bins(bins: List[dict]) -> Dict[str, float]:
+    """Scores of the union of the points of ``bins``, from their per-bin scores.
+
+    A per-bin mse, mae or bias is a weighted mean over its points, so the pooled one is the mean of
+    the bins' values weighted by what each bin weighs (``w_sum``, else ``count``): the score of all
+    the points at once, which an unweighted mean of the bins' scores is not (a bin of 1 point would
+    weigh as much as a bin of 10 000). ``rmse`` is the root of the pooled mse; ``crmse`` is the
+    centred RMSE, the error once the pooled bias is removed (sqrt(mse - bias**2)), which is what an
+    SSH score leads with when the two sides' reference surfaces differ by a constant. ``count`` is
+    the total number of points.
+    """
+    acc = {'mse': 0.0, 'mae': 0.0, 'bias': 0.0}
+    has = {k: False for k in acc}
+    w_total = 0.0
+    n_total = 0.0
+    for b in bins:
+        w = _bin_weight(b)
+        if not np.isfinite(w) or w <= 0:
+            continue
+        mse = b.get('mse')
+        if mse is None and b.get('rmse') is not None:
+            mse = float(b['rmse']) ** 2
+        vals = {'mse': mse, 'mae': b.get('mae'), 'bias': b.get('bias', b.get('me'))}
+        try:
+            vals = {k: (float(v) if v is not None else None) for k, v in vals.items()}
+        except (TypeError, ValueError):
+            continue
+        if vals['mse'] is None or not np.isfinite(vals['mse']):
+            continue
+        w_total += w
+        try:
+            n_total += float(b.get('count', 0) or 0)
+        except (TypeError, ValueError):
+            pass
+        for k, v in vals.items():
+            if v is not None and np.isfinite(v):
+                acc[k] += w * v
+                has[k] = True
+    if w_total <= 0:
+        return {}
+    out = {'mse': acc['mse'] / w_total}
+    out['rmse'] = float(np.sqrt(out['mse']))
+    if has['mae']:
+        out['mae'] = acc['mae'] / w_total
+    if has['bias']:
+        out['bias'] = acc['bias'] / w_total
+        out['me'] = out['bias']
+        out['crmse'] = float(np.sqrt(max(out['mse'] - out['bias'] ** 2, 0.0)))
+    out['count'] = n_total
+    return out
 
 
 def _lat_interval_to_label(lat_bin) -> str:
@@ -218,22 +315,7 @@ def _build_per_bins_output(class4_results_df: "pd.DataFrame") -> dict:
             for b in per_bins:
                 if 'depth_bin' not in b:
                     continue
-                depth_bin = b['depth_bin']
-                try:
-                    if hasattr(depth_bin, 'left'):
-                        depth_center = (float(depth_bin.left) + float(depth_bin.right)) / 2
-                    elif isinstance(depth_bin, dict) and 'left' in depth_bin:
-                        depth_center = (float(depth_bin['left']) + float(depth_bin['right'])) / 2
-                    else:
-                        continue
-                except Exception:
-                    continue
-
-                depth_label = None
-                for dl, (dmin, dmax) in _TARGET_DEPTHS.items():
-                    if dmin <= depth_center <= dmax:
-                        depth_label = dl
-                        break
+                depth_label = _depth_label(b['depth_bin'])
                 if depth_label is None:
                     continue
 
@@ -2128,113 +2210,52 @@ def xr_to_obs_dataframe(
 #@profile
 def format_class4_results(class4_results_df):
     """
-    Extract Class4 results and format them like sample_results_grid.txt
-    
+    Scores of each variable, over all its bins, in the layout of the gridded scores.
+
     Args:
         class4_results_df: DataFrame with columns 'per_bins', 'global', 'variable'
-    
+
     Returns:
-        pd.DataFrame: Results formatted by depth and variable
+        pd.DataFrame: one row per (Metric, Variable), ``Variable`` being "<depth label> <variable>"
+        ("Surface ssh", "200m temperature"). Bins without a depth are "Surface"; bins with one are
+        reported at the levels of ``_TARGET_DEPTHS`` only. Scores are those of all the points of
+        the bins at once (``pool_bins``): rmse, mse, mae, bias, me, crmse and count, the number
+        of points.
     """
-    
-    # Mapping of target depths (like in sample_results_grid.txt)
-    target_depths = {
-        'Surface': (0, 50),      # Premier bin = Surface
-        '50m': (45, 55),         # Autour de 50m
-        '200m': (180, 220),      # Autour de 200m
-        '550m': (500, 600)       # Autour de 550m
-    }
-    
     results = []
-    
+
     for _, row in class4_results_df.iterrows():
         variable = row['variable']
         per_bins = row.get('per_bins', [])
-        
-        if not per_bins:  # No results for this variable
+
+        if not isinstance(per_bins, list) or not per_bins:  # No results for this variable
             continue
-        
-        # Check if depth bins exist
-        has_depth_bins = any('depth_bin' in bin_data for bin_data in per_bins)
-        
-        if not has_depth_bins:
-            # No depth bins: all variables are "Surface"
-            # Accumulate all values for each metric
-            metrics_values = {}
-            
-            for bin_data in per_bins:
-                for metric_name, metric_value in bin_data.items():
-                    if metric_name not in XSKILL_METRICS and metric_name != "count":
-                        continue
-                    
-                    if metric_name not in metrics_values:
-                        metrics_values[metric_name] = []
-                    try:
-                        metrics_values[metric_name].append(float(metric_value))
-                    except (ValueError, TypeError):
-                        pass
-            
-            # Compute the mean for each metric
-            for metric_name, values in metrics_values.items():
-                if values:
-                    mean_value = np.mean(values)
-                    results.append({
-                        'Metric': metric_name,
-                        'Variable': f"Surface {variable}",
-                        'Value': mean_value
-                    })
+
+        by_depth: Dict[str, list] = {}
+        if not any('depth_bin' in bin_data for bin_data in per_bins):
+            by_depth['Surface'] = per_bins
         else:
-            # Depth bins exist: normal processing par profondeur
-            # Organize by metric and by depth
-            metrics_by_depth = {}
-            
             for bin_data in per_bins:
                 if 'depth_bin' not in bin_data:
                     continue
-                    
-                depth_interval = bin_data['depth_bin']
-                
-                # Calculer le centre de la profondeur
-                depth_center = (depth_interval.left + depth_interval.right) / 2
-                
-                for metric_name, metric_value in bin_data.items():
-                    if metric_name not in XSKILL_METRICS and metric_name != "count":
-                        continue
-                    
-                    try:
-                        val = float(metric_value)
-                    except (ValueError, TypeError):
-                        continue
+                label = _depth_label(bin_data['depth_bin'])
+                if label is not None:
+                    by_depth.setdefault(label, []).append(bin_data)
 
-                    # Associate with the corresponding target depth
-                    for depth_label, (min_depth, max_depth) in target_depths.items():
-                        if min_depth <= depth_center <= max_depth:
-                            if metric_name not in metrics_by_depth:
-                                metrics_by_depth[metric_name] = {}
-                            if depth_label not in metrics_by_depth[metric_name]:
-                                metrics_by_depth[metric_name][depth_label] = []
-                            
-                            metrics_by_depth[metric_name][depth_label].append(val)
-                            break
-            
-            # Compute means by metric and by depth
-            for metric_name, depth_values in metrics_by_depth.items():
-                for depth_label, values in depth_values.items():
-                    if values:
-                        mean_value = np.mean(values)
-                        results.append({
-                            'Metric': metric_name,
-                            'Variable': f"{depth_label} {variable}",
-                            'Value': mean_value
-                        })
-    
-    # Create the final DataFrame
+        for depth_label in _TARGET_DEPTHS:
+            if depth_label not in by_depth:
+                continue
+            pooled = pool_bins(by_depth[depth_label])
+            for metric_name, value in pooled.items():
+                results.append({
+                    'Metric': metric_name,
+                    'Variable': f"{depth_label} {variable}",
+                    'Value': value,
+                })
+
     if results:
-        df_results = pd.DataFrame(results)
-        # df_results = df_results.set_index('Metric')
-        return df_results
-    else:
-        return pd.DataFrame()
+        return pd.DataFrame(results)
+    return pd.DataFrame()
 
 
 # ----------------------------------  Main Class4Evaluator  -------------------------------------
@@ -2498,15 +2519,8 @@ class Class4Evaluator:
                         bin_results.append(res)
                         
                     # Aggregate Global Stats
-                    global_stats = {}
-                    if bin_results:
-                        df_res = pd.DataFrame(bin_results)
-                        metric_cols = ["rmse", "mse", "mae", "bias", "me"]
-                        for m in metric_cols:
-                            if m in df_res.columns:
-                                global_stats[f"{m}_mean"] = df_res[m].mean()
-                                # global_stats[f"{m}_median"] = df_res[m].median()
-                                global_stats[f"{m}_std"] = df_res[m].std()
+                    # the scores of all the points (not the mean of the bins' scores)
+                    global_stats = pool_bins(bin_results)
                                 
                     scores_result = {
                         "per_bins": bin_results,
