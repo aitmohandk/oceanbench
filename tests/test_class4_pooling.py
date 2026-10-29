@@ -94,3 +94,11 @@ def test_ensemble_bins_pool_crps_spread_and_ssr():
     assert pooled["ssr"] == pytest.approx(np.sqrt(5 / 4) * spread / pooled["rmse"])
     # a deterministic forecast's bins have none of them
     assert "crps" not in pool_bins([_bin([0.1, 0.2])])
+
+
+def test_ensemble_bins_pool_the_centred_scores():
+    a = _bin([0.1] * 3, crps=0.2, crps_c=0.1, ens_var=0.04, n_members=4.0)
+    b = _bin([0.3], crps=0.6, crps_c=0.3, ens_var=0.16, n_members=4.0)
+    pooled = pool_bins([a, b])
+    assert pooled["crps_c"] == pytest.approx((3 * 0.1 + 0.3) / 4)
+    assert pooled["ssr_c"] == pytest.approx(np.sqrt(5 / 4) * pooled["spread"] / pooled["crmse"])

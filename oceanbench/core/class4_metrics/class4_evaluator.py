@@ -206,18 +206,21 @@ def pool_bins(bins: List[dict]) -> Dict[str, float]:
         out['me'] = out['bias']
         out['crmse'] = float(np.sqrt(max(out['mse'] - out['bias'] ** 2, 0.0)))
     out['count'] = n_total
-    out.update(_pool_ensemble_bins(bins, out['rmse']))
+    out.update(_pool_ensemble_bins(bins, out['rmse'], out.get('crmse', float('nan'))))
     return out
 
 
-def _pool_ensemble_bins(bins: List[dict], rmse: float) -> Dict[str, float]:
-    """crps, spread and ssr of bins scored from an ensemble (they carry crps, ens_var, n_members).
+def _pool_ensemble_bins(bins: List[dict], rmse: float, crmse: float = float('nan')
+                        ) -> Dict[str, float]:
+    """crps, spread and ssr of bins scored from an ensemble (they carry crps, ens_var, n_members,
+    and crps_c when centred).
 
-    The pooled crps and ensemble variance are weighted means over the bins; ``spread`` is the
-    root of the variance; ``ssr`` = sqrt((M + 1) / M) * spread / rmse, the bins' mse being that of
-    the ensemble mean. Empty for a deterministic forecast.
+    The pooled crps, crps_c and ensemble variance are weighted means over the bins; ``spread`` is
+    the root of the variance; ``ssr`` = sqrt((M + 1) / M) * spread / rmse, the bins' mse being
+    that of the ensemble mean, and ``ssr_c`` the same over ``crmse``. Empty for a deterministic
+    forecast.
     """
-    w_total = w_crps = w_var = 0.0
+    w_total = w_crps = w_var = w_crps_c = w_c = 0.0
     n_members = 0.0
     for b in bins:
         if b.get('crps') is None:
@@ -233,11 +236,24 @@ def _pool_ensemble_bins(bins: List[dict], rmse: float) -> Dict[str, float]:
         w_crps += w * crps
         w_var += w * var
         n_members = float(b.get('n_members') or n_members)
+        try:
+            crps_c = float(b.get('crps_c'))
+        except (TypeError, ValueError):
+            crps_c = float('nan')
+        if np.isfinite(crps_c):
+            w_crps_c += w * crps_c
+            w_c += w
     if w_total <= 0:
         return {}
     out = {'crps': w_crps / w_total, 'spread': float(np.sqrt(w_var / w_total))}
-    out['ssr'] = (float(np.sqrt((n_members + 1) / n_members) * out['spread'] / rmse)
-                  if n_members > 1 and rmse > 0 else float('nan'))
+    # the ratios only when defined (one member, or a perfect ensemble mean: none)
+    factor = float(np.sqrt((n_members + 1) / n_members)) if n_members > 1 else None
+    if factor is not None and rmse > 0:
+        out['ssr'] = factor * out['spread'] / rmse
+    if w_c > 0:
+        out['crps_c'] = w_crps_c / w_c
+        if factor is not None and np.isfinite(crmse) and crmse > 0:
+            out['ssr_c'] = factor * out['spread'] / crmse
     return out
 
 
