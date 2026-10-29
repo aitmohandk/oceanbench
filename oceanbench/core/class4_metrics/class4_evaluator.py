@@ -165,7 +165,8 @@ def pool_bins(bins: List[dict]) -> Dict[str, float]:
     weigh as much as a bin of 10 000). ``rmse`` is the root of the pooled mse; ``crmse`` is the
     centred RMSE, the error once the pooled bias is removed (sqrt(mse - bias**2)), which is what an
     SSH score leads with when the two sides' reference surfaces differ by a constant. ``count`` is
-    the total number of points.
+    the total number of points. Bins scored from an ensemble (``crps``, ``ens_var``, ``n_members``)
+    add crps, spread and ssr (``_pool_ensemble_bins``).
     """
     acc = {'mse': 0.0, 'mae': 0.0, 'bias': 0.0}
     has = {k: False for k in acc}
@@ -205,6 +206,38 @@ def pool_bins(bins: List[dict]) -> Dict[str, float]:
         out['me'] = out['bias']
         out['crmse'] = float(np.sqrt(max(out['mse'] - out['bias'] ** 2, 0.0)))
     out['count'] = n_total
+    out.update(_pool_ensemble_bins(bins, out['rmse']))
+    return out
+
+
+def _pool_ensemble_bins(bins: List[dict], rmse: float) -> Dict[str, float]:
+    """crps, spread and ssr of bins scored from an ensemble (they carry crps, ens_var, n_members).
+
+    The pooled crps and ensemble variance are weighted means over the bins; ``spread`` is the
+    root of the variance; ``ssr`` = sqrt((M + 1) / M) * spread / rmse, the bins' mse being that of
+    the ensemble mean. Empty for a deterministic forecast.
+    """
+    w_total = w_crps = w_var = 0.0
+    n_members = 0.0
+    for b in bins:
+        if b.get('crps') is None:
+            continue
+        w = _bin_weight(b)
+        try:
+            crps, var = float(b['crps']), float(b.get('ens_var', 0.0))
+        except (TypeError, ValueError):
+            continue
+        if not (np.isfinite(w) and w > 0 and np.isfinite(crps) and np.isfinite(var)):
+            continue
+        w_total += w
+        w_crps += w * crps
+        w_var += w * var
+        n_members = float(b.get('n_members') or n_members)
+    if w_total <= 0:
+        return {}
+    out = {'crps': w_crps / w_total, 'spread': float(np.sqrt(w_var / w_total))}
+    out['ssr'] = (float(np.sqrt((n_members + 1) / n_members) * out['spread'] / rmse)
+                  if n_members > 1 and rmse > 0 else float('nan'))
     return out
 
 

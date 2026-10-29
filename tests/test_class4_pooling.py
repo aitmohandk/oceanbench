@@ -81,3 +81,16 @@ def test_format_without_depth_is_surface():
     scores = _scores(df)
     assert scores[("rmse", "Surface ssh")] == pytest.approx(0.2)
     assert scores[("count", "Surface ssh")] == 4
+
+
+def test_ensemble_bins_pool_crps_spread_and_ssr():
+    # bins scored from a 4-member ensemble: crps and the ensemble variance are weighted means
+    a = _bin([0.1] * 3, crps=0.2, ens_var=0.04, n_members=4.0)
+    b = _bin([0.3], crps=0.6, ens_var=0.16, n_members=4.0)
+    pooled = pool_bins([a, b])
+    assert pooled["crps"] == pytest.approx((3 * 0.2 + 0.6) / 4)
+    spread = np.sqrt((3 * 0.04 + 0.16) / 4)
+    assert pooled["spread"] == pytest.approx(spread)
+    assert pooled["ssr"] == pytest.approx(np.sqrt(5 / 4) * spread / pooled["rmse"])
+    # a deterministic forecast's bins have none of them
+    assert "crps" not in pool_bins([_bin([0.1, 0.2])])
